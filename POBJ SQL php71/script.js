@@ -6166,6 +6166,38 @@ function setOptions(selectEl, items, emptyLabel='Todos') {
   if (opts.some(o => o.value === prev)) selectEl.value = prev;
 }
 
+function refreshSelectSearchOptions(selectEl, aliasFactory) {
+  if (!selectEl || selectEl.dataset.search !== 'true') return;
+  ensureSelectSearch(selectEl);
+  const entries = Array.from(selectEl.options || []).map(opt => {
+    const value = String(opt.value ?? '').trim();
+    const label = String(opt.textContent ?? opt.label ?? value).trim();
+    if (!value && !label) return null;
+    const aliases = typeof aliasFactory === 'function'
+      ? aliasFactory(value, label)
+      : [label, value].filter(Boolean);
+    return { value, label: label || value, aliases: Array.isArray(aliases) ? aliases.filter(Boolean) : [] };
+  }).filter(Boolean);
+  storeSelectSearchOptions(selectEl, entries);
+  syncSelectSearchInput(selectEl);
+}
+
+function resolveIndicadorSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  const meta = INDICATOR_CARD_INDEX.get(value) || PRODUCT_INDEX.get(value) || {};
+  if (meta.nome) aliases.add(meta.nome);
+  if (meta.name) aliases.add(meta.name);
+  if (Array.isArray(meta.aliases)) meta.aliases.forEach(alias => aliases.add(alias));
+  const aliasSet = CARD_ALIAS_INDEX.get(value);
+  if (aliasSet instanceof Set) aliasSet.forEach(alias => aliases.add(alias));
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
+}
+
+function resolveSubindicadorSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
+}
+
 // Aqui eu faço uma chamada POST simples contra a API para enviar JSON.
 async function apiPost(path, body = {}, params){
   let baseUrl;
@@ -6271,6 +6303,8 @@ const $regional  = document.getElementById('f-gerencia');
 const $agencia   = document.getElementById('f-agencia');
 const $gg        = document.getElementById('f-ggestao');
 const $gerente   = document.getElementById('f-gerente');
+const $indicador = document.getElementById('f-familia');
+const $subindicador = document.getElementById('f-produto');
 
 function qs() {
   const p = new URLSearchParams();
@@ -6288,6 +6322,25 @@ function buildFiltrosUrl(nivel) {
   return query ? `${base}&${query}` : base;
 }
 
+function buildSubindicadoresUrl(indicadorId) {
+  const base = `${API_BASE}?endpoint=filtros&nivel=subindicadores`;
+  if (!indicadorId) return base;
+  return `${base}&indicador_id=${encodeURIComponent(indicadorId)}`;
+}
+
+function buildResumoParams() {
+  const params = new URLSearchParams();
+  if ($segmento?.value)  params.set('segmento_id', $segmento.value);
+  if ($diretoria?.value) params.set('diretoria_id', $diretoria.value);
+  if ($regional?.value)  params.set('regional_id', $regional.value);
+  if ($agencia?.value)   params.set('agencia_id', $agencia.value);
+  if ($gg?.value)        params.set('gg_funcional', $gg.value);
+  if ($gerente?.value)   params.set('gerente_funcional', $gerente.value);
+  if ($indicador?.value) params.set('indicador_id', $indicador.value);
+  if ($subindicador?.value) params.set('subindicador_id', $subindicador.value);
+  return params.toString();
+}
+
 async function bootstrapFiltros() {
   try {
     const data = await apiGet(`${API_BASE}?endpoint=bootstrap`);
@@ -6297,6 +6350,16 @@ async function bootstrapFiltros() {
     setOptions($agencia,   data?.agencias,   'Todas');
     setOptions($gg,        data?.ggestoes,   'Todos');
     setOptions($gerente,   data?.gerentes,   'Todos');
+    setOptions($indicador, data?.indicadores, 'Todos');
+    setOptions($subindicador, data?.subindicadores ?? [], 'Todos');
+    if ($indicador) {
+      $indicador.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
+    }
+    if ($subindicador) {
+      $subindicador.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+    }
   } catch (error) {
     console.error('Falha ao carregar filtros iniciais.', error);
   }
@@ -6377,6 +6440,23 @@ $gg?.addEventListener('change', async () => {
   try {
     const ge = await apiGet(buildFiltrosUrl('gerentes'));
     setOptions($gerente, ge?.gerentes, 'Todos');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$indicador?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar subindicadores.';
+  const id = $indicador?.value || '';
+  setOptions($subindicador, [], 'Todos');
+  refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+  if (!id) {
+    return;
+  }
+  try {
+    const res = await apiGet(buildSubindicadoresUrl(id));
+    setOptions($subindicador, res?.subindicadores, 'Todos');
+    refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
   }
@@ -9408,6 +9488,8 @@ function getFilterValues() {
     secaoId:   val("#f-secao"),
     familiaId: val("#f-familia"),
     produtoId: val("#f-produto"),
+    indicadorId: val("#f-familia"),
+    subindicadorId: val("#f-produto"),
     status:    statusKey || "todos",
     statusCodigo,
     statusId,
@@ -10308,88 +10390,97 @@ function initCombos() {
   const familiaSelect = $("#f-familia");
   const secaoSelect = $("#f-secao");
   const produtoSelect = $("#f-produto");
-  const buildIndicatorOptions = (secaoId) => {
-    const base = [{ value: "Todas", label: "Todos", aliases: ["Todos", "Todas"] }];
-    const filtroSecao = secaoId && secaoId !== "Todas" ? secaoId : "";
-    const added = new Set();
-    const indicadores = [];
-    const consider = (prod) => {
-      if (!prod || !prod.id || added.has(prod.id)) return;
-      if (filtroSecao && prod.secaoId && prod.secaoId !== filtroSecao) return;
-      const cardMeta = INDICATOR_CARD_INDEX.get(prod.id) || PRODUCT_INDEX.get(prod.id) || {};
-      const familiaMeta = PRODUTO_TO_FAMILIA.get(prod.id) || {};
-      const prodSecao = cardMeta.sectionId || familiaMeta.secaoId || prod.secaoId || "";
-      if (filtroSecao && prodSecao && prodSecao !== filtroSecao) return;
-      const nome = cardMeta.nome || cardMeta.name || prod.nome || prod.id;
-      const aliasList = new Set([prod.id, nome, cardMeta.nome, cardMeta.name]);
-      if (Array.isArray(cardMeta.aliases)) {
-        cardMeta.aliases.forEach(alias => aliasList.add(limparTexto(alias)));
+  if (familiaSelect && familiaSelect.dataset.apiManaged === '1') {
+    ensureSelectSearch(familiaSelect);
+    refreshSelectSearchOptions(familiaSelect, resolveIndicadorSearchAliases);
+    if (produtoSelect) {
+      ensureSelectSearch(produtoSelect);
+      refreshSelectSearchOptions(produtoSelect, resolveSubindicadorSearchAliases);
+    }
+  } else {
+    const buildIndicatorOptions = (secaoId) => {
+      const base = [{ value: "Todas", label: "Todos", aliases: ["Todos", "Todas"] }];
+      const filtroSecao = secaoId && secaoId !== "Todas" ? secaoId : "";
+      const added = new Set();
+      const indicadores = [];
+      const consider = (prod) => {
+        if (!prod || !prod.id || added.has(prod.id)) return;
+        if (filtroSecao && prod.secaoId && prod.secaoId !== filtroSecao) return;
+        const cardMeta = INDICATOR_CARD_INDEX.get(prod.id) || PRODUCT_INDEX.get(prod.id) || {};
+        const familiaMeta = PRODUTO_TO_FAMILIA.get(prod.id) || {};
+        const prodSecao = cardMeta.sectionId || familiaMeta.secaoId || prod.secaoId || "";
+        if (filtroSecao && prodSecao && prodSecao !== filtroSecao) return;
+        const nome = cardMeta.nome || cardMeta.name || prod.nome || prod.id;
+        const aliasList = new Set([prod.id, nome, cardMeta.nome, cardMeta.name]);
+        if (Array.isArray(cardMeta.aliases)) {
+          cardMeta.aliases.forEach(alias => aliasList.add(limparTexto(alias)));
+        }
+        const aliasSet = CARD_ALIAS_INDEX.get(prod.id);
+        if (aliasSet instanceof Set) aliasSet.forEach(item => aliasList.add(item));
+        indicadores.push({ value: prod.id, label: nome || prod.id, aliases: Array.from(aliasList).filter(Boolean) });
+        added.add(prod.id);
+      };
+      if (filtroSecao) {
+        (PRODUTOS_BY_FAMILIA.get(filtroSecao) || []).forEach(consider);
+      } else {
+        PRODUTOS_BY_FAMILIA.forEach(list => list.forEach(consider));
       }
-      const aliasSet = CARD_ALIAS_INDEX.get(prod.id);
-      if (aliasSet instanceof Set) aliasSet.forEach(item => aliasList.add(item));
-      indicadores.push({ value: prod.id, label: nome || prod.id, aliases: Array.from(aliasList).filter(Boolean) });
-      added.add(prod.id);
+      indicadores.sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt-BR", { sensitivity: "base" }));
+      return base.concat(indicadores);
     };
-    if (filtroSecao) {
-      (PRODUTOS_BY_FAMILIA.get(filtroSecao) || []).forEach(consider);
-    } else {
-      PRODUTOS_BY_FAMILIA.forEach(list => list.forEach(consider));
+
+    const buildSubIndicadorOptions = (indicadorId) => {
+      const base = [{ value: "Todos", label: "Todos", aliases: ["Todos", "Todas"] }];
+      const resolved = resolverIndicadorPorAlias(indicadorId) || limparTexto(indicadorId);
+      if (!resolved || resolved === "Todas" || resolved === "Todos") return base;
+      const entries = getFlatSubIndicatorOptions(resolved);
+      if (!entries.length) return base;
+      return base.concat(entries);
+    };
+
+    const applySubIndicadorOptions = (preserveValue = true) => {
+      if (!produtoSelect) return;
+      const indicadorVal = familiaSelect ? familiaSelect.value : "Todas";
+      const previous = preserveValue ? produtoSelect.value : "Todos";
+      const options = buildSubIndicadorOptions(indicadorVal);
+      fill("#f-produto", options);
+      const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todos";
+      if (options.some(opt => opt.value === desired)) {
+        produtoSelect.value = desired;
+      }
+      produtoSelect.disabled = options.length <= 1;
+      if (produtoSelect.dataset.search === "true") syncSelectSearchInput(produtoSelect);
+    };
+
+    const applyIndicatorOptions = (preserveValue = true) => {
+      if (!familiaSelect) return;
+      const secVal = secaoSelect ? secaoSelect.value : "Todas";
+      const previous = preserveValue ? familiaSelect.value : "Todas";
+      const options = buildIndicatorOptions(secVal);
+      fill("#f-familia", options);
+      const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todas";
+      if (options.some(opt => opt.value === desired)) {
+        familiaSelect.value = desired;
+      }
+      if (familiaSelect.dataset.search === "true") syncSelectSearchInput(familiaSelect);
+      applySubIndicadorOptions(preserveValue);
+    };
+
+    applyIndicatorOptions(true);
+
+    if (familiaSelect && !familiaSelect.dataset.bound) {
+      familiaSelect.dataset.bound = "1";
+      familiaSelect.addEventListener("change", () => {
+        applySubIndicadorOptions(false);
+      });
     }
-    indicadores.sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt-BR", { sensitivity: "base" }));
-    return base.concat(indicadores);
-  };
 
-  const buildSubIndicadorOptions = (indicadorId) => {
-    const base = [{ value: "Todos", label: "Todos", aliases: ["Todos", "Todas"] }];
-    const resolved = resolverIndicadorPorAlias(indicadorId) || limparTexto(indicadorId);
-    if (!resolved || resolved === "Todas" || resolved === "Todos") return base;
-    const entries = getFlatSubIndicatorOptions(resolved);
-    if (!entries.length) return base;
-    return base.concat(entries);
-  };
-
-  const applySubIndicadorOptions = (preserveValue = true) => {
-    if (!produtoSelect) return;
-    const indicadorVal = familiaSelect ? familiaSelect.value : "Todas";
-    const previous = preserveValue ? produtoSelect.value : "Todos";
-    const options = buildSubIndicadorOptions(indicadorVal);
-    fill("#f-produto", options);
-    const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todos";
-    if (options.some(opt => opt.value === desired)) {
-      produtoSelect.value = desired;
+    if (secaoSelect && !secaoSelect.dataset.bound) {
+      secaoSelect.dataset.bound = "1";
+      secaoSelect.addEventListener("change", () => {
+        applyIndicatorOptions(true);
+      });
     }
-    produtoSelect.disabled = options.length <= 1;
-    if (produtoSelect.dataset.search === "true") syncSelectSearchInput(produtoSelect);
-  };
-
-  const applyIndicatorOptions = (preserveValue = true) => {
-    if (!familiaSelect) return;
-    const secVal = secaoSelect ? secaoSelect.value : "Todas";
-    const previous = preserveValue ? familiaSelect.value : "Todas";
-    const options = buildIndicatorOptions(secVal);
-    fill("#f-familia", options);
-    const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todas";
-    if (options.some(opt => opt.value === desired)) {
-      familiaSelect.value = desired;
-    }
-    if (familiaSelect.dataset.search === "true") syncSelectSearchInput(familiaSelect);
-    applySubIndicadorOptions(preserveValue);
-  };
-
-  applyIndicatorOptions(true);
-
-  if (familiaSelect && !familiaSelect.dataset.bound) {
-    familiaSelect.dataset.bound = "1";
-    familiaSelect.addEventListener("change", () => {
-      applySubIndicadorOptions(false);
-    });
-  }
-
-  if (secaoSelect && !secaoSelect.dataset.bound) {
-    secaoSelect.dataset.bound = "1";
-    secaoSelect.addEventListener("change", () => {
-      applyIndicatorOptions(true);
-    });
   }
 
   updateStatusFilterOptions();

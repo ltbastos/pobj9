@@ -96,6 +96,17 @@ try {
                 echo json_encode(['agencias' => $rows]); exit;
             }
 
+            if ($nivel === 'subindicadores') {
+                $rows = q($pdo, "
+                    SELECT DISTINCT p.id_subindicador AS id, p.subindicador AS label
+                    FROM d_produto p
+                    WHERE p.id_indicador = :indicador_id
+                      AND p.id_subindicador IS NOT NULL
+                    ORDER BY label
+                ", [':indicador_id' => $_GET['indicador_id'] ?? 0]);
+                echo json_encode(['subindicadores' => $rows]); exit;
+            }
+
             if ($nivel === 'ggestoes') {
                 // lista GG no escopo filtrado
                 list($isGGsql, $isGGparams) = sqlIsGG();
@@ -162,6 +173,12 @@ try {
                        WHERE e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
                        ORDER BY label");
 
+            $indicadores = q($pdo, "
+                SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
+                FROM d_produto p
+                ORDER BY label
+            ");
+
             // GG
             list($isGGsql, $isGGparams) = sqlIsGG();
             $ggestoes = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
@@ -177,13 +194,15 @@ try {
                        ORDER BY label", $isGerparams);
 
             echo json_encode([
-                'segmentos'   => $segmentos,
-                'diretorias'  => $diretorias,
-                'regionais'   => $regionais,
-                'agencias'    => $agencias,
-                'ggestoes'    => $ggestoes,
-                'gerentes'    => $gerentes,
-                'updated_at'  => date('c'),
+                'segmentos'        => $segmentos,
+                'diretorias'       => $diretorias,
+                'regionais'        => $regionais,
+                'agencias'         => $agencias,
+                'ggestoes'         => $ggestoes,
+                'gerentes'         => $gerentes,
+                'indicadores'      => $indicadores,
+                'subindicadores'   => [],
+                'updated_at'       => date('c'),
             ]);
             exit;
         }
@@ -197,75 +216,99 @@ try {
             $ger = trim($_GET['gerente_funcional'] ?? '');
             $ini = trim($_GET['data_ini'] ?? '');
             $fim = trim($_GET['data_fim'] ?? '');
-            $indicador = trim($_GET['id_indicador'] ?? '');
+            $indicadorParam = trim((string)($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? ''));
+            $subIndicadorParam = trim((string)($_GET['subindicador_id'] ?? $_GET['id_subindicador'] ?? ''));
 
             if ($ini === '' || $fim === '') {
                 $jsonError('data_ini/data_fim obrigatórios');
             }
 
             $filters = [];
-            $bind = [
+            $params = [
                 ':ini' => $ini,
                 ':fim' => $fim,
             ];
 
             if ($seg !== '') {
                 $filters[] = 'e.id_segmento = :segmento_id';
-                $bind[':segmento_id'] = $seg;
+                $params[':segmento_id'] = $seg;
             }
             if ($dir !== '') {
                 $filters[] = 'e.id_diretoria = :diretoria_id';
-                $bind[':diretoria_id'] = $dir;
+                $params[':diretoria_id'] = $dir;
             }
             if ($reg !== '') {
                 $filters[] = 'e.id_regional = :regional_id';
-                $bind[':regional_id'] = $reg;
+                $params[':regional_id'] = $reg;
             }
             if ($age !== '') {
                 $filters[] = 'e.id_agencia = :agencia_id';
-                $bind[':agencia_id'] = $age;
+                $params[':agencia_id'] = $age;
             }
             if ($gg !== '') {
                 $filters[] = 'e.funcional = :gg_funcional';
-                $bind[':gg_funcional'] = $gg;
+                $params[':gg_funcional'] = $gg;
             }
             if ($ger !== '') {
                 $filters[] = 'e.funcional = :gerente_funcional';
-                $bind[':gerente_funcional'] = $ger;
+                $params[':gerente_funcional'] = $ger;
             }
 
-            $where = $filters ? ' AND ' . implode(' AND ', $filters) : '';
+            $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
-            $indicadorFilterReal = '';
-            $indicadorFilterMeta = '';
-            if ($indicador !== '') {
-                $bind[':id_indicador'] = $indicador;
-                $indicadorFilterReal = ' AND r.id_indicador = :id_indicador';
-                $indicadorFilterMeta = ' AND m.id_indicador = :id_indicador';
+            $prodCondReal = '1=1';
+            $prodCondMeta = '1=1';
+
+            if ($subIndicadorParam !== '') {
+                $params[':sid'] = (int) $subIndicadorParam;
+                $params[':iid'] = (int) ($indicadorParam !== '' ? $indicadorParam : ($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? 0));
+                $prodCondReal = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
+                $prodCondMeta = $prodCondReal;
+            } elseif ($indicadorParam !== '') {
+                $params[':iid'] = (int) $indicadorParam;
+                $prodCondReal = 'p.id_indicador = :iid';
+                $prodCondMeta = $prodCondReal;
             }
 
-            $real = q($pdo,
-                "SELECT SUM(r.realizado) AS total_realizado
-                 FROM f_realizado r
-                 JOIN d_calendario c ON c.data = r.data_realizado
-                 JOIN d_estrutura e ON e.funcional = r.funcional
-                 WHERE c.data BETWEEN :ini AND :fim{$indicadorFilterReal}{$where}",
-                $bind
-            );
+            $sqlReal = "
+                SELECT SUM(fr.realizado) AS realizado
+                FROM f_realizado fr
+                JOIN d_calendario c ON c.data = fr.data_realizado
+                JOIN d_produto p
+                  ON p.id_indicador = fr.id_indicador
+                 AND p.id_subindicador <=> fr.id_subindicador
+                JOIN d_estrutura e ON e.funcional = fr.funcional
+                WHERE c.data BETWEEN :ini AND :fim
+                  AND ($prodCondReal)
+                  $estruturaWhere
+            ";
+            $real = q($pdo, $sqlReal, $params);
 
-            $meta = q($pdo,
-                "SELECT SUM(m.meta_mensal) AS total_meta
-                 FROM f_meta m
-                 JOIN d_calendario c ON c.data = m.data_meta
-                 JOIN d_estrutura e ON e.funcional = m.funcional
-                 WHERE c.data BETWEEN :ini AND :fim{$indicadorFilterMeta}{$where}",
-                $bind
-            );
+            $sqlMeta = "
+                SELECT SUM(fm.meta_mensal) AS meta
+                FROM f_meta fm
+                JOIN d_calendario c ON c.data = fm.data_meta
+                JOIN d_produto p
+                  ON p.id_indicador = fm.id_indicador
+                 AND p.id_subindicador <=> fm.id_subindicador
+                JOIN d_estrutura e ON e.funcional = fm.funcional
+                WHERE c.data BETWEEN DATE_FORMAT(:fim,'%Y-%m-01') AND :fim
+                  AND ($prodCondMeta)
+                  $estruturaWhere
+            ";
+            $meta = q($pdo, $sqlMeta, $params);
 
-            $json([
-                'realizado_total' => (float) ($real[0]['total_realizado'] ?? 0),
-                'meta_total' => (float) ($meta[0]['total_meta'] ?? 0),
+            $realizado_total = (float) ($real[0]['realizado'] ?? 0);
+            $meta_total = (float) ($meta[0]['meta'] ?? 0);
+
+            echo json_encode([
+                'kpi' => [
+                    'realizado_total' => $realizado_total,
+                    'meta_total' => $meta_total,
+                ],
+                'updated_at' => date('c'),
             ]);
+            exit;
 
         default:
             $jsonError('endpoint não encontrado', 404);
