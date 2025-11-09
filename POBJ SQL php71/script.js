@@ -6312,6 +6312,11 @@ const $familia   = document.getElementById('f-secao');
 const $indicador = document.getElementById('f-familia');
 const $subindicador = document.getElementById('f-produto');
 
+function toInt(value) {
+  const n = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 function qs() {
   const p = new URLSearchParams();
   if ($segmento?.value)  p.set('segmento_id', $segmento.value);
@@ -6319,7 +6324,8 @@ function qs() {
   if ($regional?.value)  p.set('regional_id',  $regional.value);
   if ($agencia?.value)   p.set('agencia_id',   $agencia.value);
   if ($gg?.value)        p.set('gg_funcional', $gg.value);
-  if ($familia?.value)   p.set('familia_id',   $familia.value);
+  const fid = toInt($familia?.value);
+  if (fid) p.set('familia_id', String(fid));
   return p.toString();
 }
 
@@ -6331,14 +6337,15 @@ function buildFiltrosUrl(nivel) {
 
 function buildIndicadoresUrl() {
   const base = `${API_BASE}?endpoint=filtros&nivel=indicadores`;
-  const fid = $familia?.value;
+  const fid = toInt($familia?.value);
   return fid ? `${base}&familia_id=${encodeURIComponent(fid)}` : base;
 }
 
 function buildSubindicadoresUrl(indicadorId) {
   const base = `${API_BASE}?endpoint=filtros&nivel=subindicadores`;
-  if (!indicadorId) return base;
-  return `${base}&indicador_id=${encodeURIComponent(indicadorId)}`;
+  const iid = toInt(indicadorId);
+  if (!iid) return base;
+  return `${base}&indicador_id=${encodeURIComponent(iid)}`;
 }
 
 function buildResumoParams() {
@@ -6349,15 +6356,12 @@ function buildResumoParams() {
   if ($agencia?.value)   params.set('agencia_id', $agencia.value);
   if ($gg?.value)        params.set('gg_funcional', $gg.value);
   if ($gerente?.value)   params.set('gerente_funcional', $gerente.value);
-  if ($familia && $familia.value) {
-    params.set('familia_id', $familia.value);
-  }
-  if ($indicador && $indicador.value) {
-    params.set('indicador_id', $indicador.value);
-  }
-  if ($subindicador && $subindicador.value) {
-    params.set('subindicador_id', $subindicador.value);
-  }
+  const fid = toInt($familia?.value);
+  const iid = toInt($indicador?.value);
+  const sid = toInt($subindicador?.value);
+  if (fid) params.set('familia_id', String(fid));
+  if (iid) params.set('indicador_id', String(iid));
+  if (sid) params.set('subindicador_id', String(sid));
   return params.toString();
 }
 
@@ -6422,6 +6426,8 @@ $segmento?.addEventListener('change', async () => {
 
 $familia?.addEventListener('change', async () => {
   const context = 'Falha ao atualizar indicadores.';
+  const triggeredProgrammatically = $familia?.dataset?.updating === '1';
+  const keepIndicatorValue = triggeredProgrammatically && $indicador ? $indicador.value : '';
   setOptions($indicador, [], 'Todos');
   setOptions($subindicador, [], 'Todos');
   refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
@@ -6429,6 +6435,14 @@ $familia?.addEventListener('change', async () => {
   try {
     const res = await apiGet(buildIndicadoresUrl());
     setOptions($indicador, res?.indicadores, 'Todos');
+    if (triggeredProgrammatically && keepIndicatorValue) {
+      const options = Array.from($indicador?.options ?? []);
+      const hasPrevious = options.some(opt => String(opt.value) === String(keepIndicatorValue));
+      if (hasPrevious) {
+        $indicador.value = keepIndicatorValue;
+        if ($indicador.dataset.search === 'true') syncSelectSearchInput($indicador);
+      }
+    }
     refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
@@ -6487,18 +6501,34 @@ $gg?.addEventListener('change', async () => {
 
 $indicador?.addEventListener('change', async () => {
   const context = 'Falha ao atualizar subindicadores.';
-  const id = $indicador?.value || '';
+  const rawId = $indicador?.value || '';
   setOptions($subindicador, [], 'Todos');
   refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
-  if (!id) {
+  const iid = toInt(rawId);
+  if (!iid) {
     return;
   }
+  let resetFamilia = false;
   try {
-    const res = await apiGet(buildSubindicadoresUrl(id));
-    setOptions($subindicador, res?.subindicadores, 'Todos');
+    const info = await apiGet(`${API_BASE}?endpoint=filtros&nivel=produto_info&indicador_id=${encodeURIComponent(iid)}`);
+    if (info?.familia_id && $familia) {
+      const desired = String(info.familia_id);
+      if (String($familia.value || '') !== desired) {
+        $familia.dataset.updating = '1';
+        resetFamilia = true;
+        $familia.value = desired;
+        if ($familia.dataset.search === 'true') syncSelectSearchInput($familia);
+        $familia.dispatchEvent(new Event('change'));
+      }
+    }
+    setOptions($subindicador, info?.subindicadores || [], 'Todos');
     refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
+  } finally {
+    if (resetFamilia) {
+      delete $familia.dataset.updating;
+    }
   }
 });
 // Aqui eu faço todo o processo de montar os dados consolidados (fatos + metas + campanhas) usados nas telas.

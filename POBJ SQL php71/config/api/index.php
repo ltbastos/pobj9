@@ -21,11 +21,25 @@ try {
       return array_values(array_filter(array_map('trim', explode(',', $v))));
     }
 
-    function q(PDO $pdo, $sql, $params = []) {
+    function q(PDO $pdo, string $sql, array $p = []) {
       $st = $pdo->prepare($sql);
-      foreach ($params as $k => $v) $st->bindValue(is_int($k)?$k+1:$k, $v);
+      $pos = 1;
+      foreach ($p as $k => $v) {
+        if (is_int($k)) {
+          $st->bindValue($pos, $v);
+          $pos++;
+        } else {
+          $st->bindValue($k, $v);
+        }
+      }
       $st->execute();
       return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    function numOrNull(string $k): ?int {
+      if (!isset($_GET[$k])) return null;
+      $n = (int) $_GET[$k];
+      return $n > 0 ? $n : null;
     }
 
     function buildWhereEstrutura(array $get, &$params) {
@@ -39,15 +53,30 @@ try {
 
     function sqlIsGG() {
       $ids = envArray('GG_IDS', ['GG','GERENTE_GESTAO']);
-      $in = implode(',', array_fill(0, count($ids), '?'));
-      // retorna [sql, params]
-      return ['(e.id_cargo IN ('.$in.') OR e.cargo LIKE ?)', array_merge($ids, ['%gest%'])];
+      $placeholders = [];
+      $params = [];
+      foreach ($ids as $idx => $id) {
+        $key = ':gg_id_' . $idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $params[':gg_like'] = '%gest%';
+      $inSql = $placeholders ? 'e.id_cargo IN (' . implode(',', $placeholders) . ')' : '1=0';
+      return ['(' . $inSql . ' OR e.cargo LIKE :gg_like)', $params];
     }
 
     function sqlIsGerente() {
       $ids = envArray('GERENTE_IDS', ['GERENTE']);
-      $in = implode(',', array_fill(0, count($ids), '?'));
-      return ['(e.id_cargo IN ('.$in.') OR e.cargo LIKE ?)', array_merge($ids, ['gerente%'])];
+      $placeholders = [];
+      $params = [];
+      foreach ($ids as $idx => $id) {
+        $key = ':ger_id_' . $idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $params[':ger_like'] = 'gerente%';
+      $inSql = $placeholders ? 'e.id_cargo IN (' . implode(',', $placeholders) . ')' : '1=0';
+      return ['(' . $inSql . ' OR e.cargo LIKE :ger_like)', $params];
     }
 
     $endpoint = $_GET['endpoint'] ?? '';
@@ -98,15 +127,18 @@ try {
 
             if ($nivel === 'indicadores') {
                 $prodParams = [];
-                $prodWhere = '1=1';
+                $where = "NULLIF(TRIM(p.indicador),'') IS NOT NULL";
                 if (!empty($_GET['familia_id'])) {
-                    $prodWhere .= ' AND p.id_familia = :fid';
-                    $prodParams[':fid'] = (int) $_GET['familia_id'];
+                    $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM d_produto WHERE id_familia = :fid", [':fid' => (int) $_GET['familia_id']]);
+                    if (!empty($famKey[0]['fam_key'])) {
+                        $where .= ' AND UPPER(TRIM(p.familia)) = :famk';
+                        $prodParams[':famk'] = $famKey[0]['fam_key'];
+                    }
                 }
                 $rows = q($pdo, "
                     SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
                     FROM d_produto p
-                    WHERE $prodWhere
+                    WHERE $where
                     ORDER BY label
                 ", $prodParams);
                 echo json_encode(['indicadores' => $rows]); exit;
@@ -119,9 +151,33 @@ try {
                     FROM d_produto p
                     WHERE p.id_indicador = :iid
                       AND p.id_subindicador IS NOT NULL
+                      AND NULLIF(TRIM(p.subindicador),'') IS NOT NULL
                     ORDER BY label
                 ", [':iid' => $iid]);
                 echo json_encode(['subindicadores' => $rows]); exit;
+            }
+
+            if ($nivel === 'produto_info') {
+                $iid = (int) ($_GET['indicador_id'] ?? 0);
+                $info = q($pdo, "
+                    SELECT MIN(id_familia) AS familia_id, MAX(familia) AS familia_label
+                    FROM d_produto
+                    WHERE id_indicador = :iid
+                ", [':iid' => $iid]);
+                $subs = q($pdo, "
+                    SELECT DISTINCT id_subindicador AS id, subindicador AS label
+                    FROM d_produto
+                    WHERE id_indicador = :iid
+                      AND id_subindicador IS NOT NULL
+                      AND NULLIF(TRIM(subindicador),'') IS NOT NULL
+                    ORDER BY label
+                ", [':iid' => $iid]);
+                echo json_encode([
+                    'familia_id' => $info[0]['familia_id'] ?? null,
+                    'familia' => $info[0]['familia_label'] ?? null,
+                    'subindicadores' => $subs,
+                ]);
+                exit;
             }
 
             if ($nivel === 'ggestoes') {
@@ -140,15 +196,21 @@ try {
                 if (!empty($_GET['gg_funcional'])) {
                     $agenciasDoGG = q($pdo, "SELECT DISTINCT id_agencia FROM d_estrutura WHERE funcional = :gg", [':gg'=>$_GET['gg_funcional']]);
                     if ($agenciasDoGG) {
-                        $in = implode(',', array_fill(0, count($agenciasDoGG), '?'));
-                        $extra = " AND e.id_agencia IN ($in) ";
-                        foreach ($agenciasDoGG as $a) $pp[] = $a['id_agencia'];
+                        $ph = [];
+                        foreach ($agenciasDoGG as $idx => $a) {
+                            $key = ':agencia_' . $idx;
+                            $ph[] = $key;
+                            $pp[$key] = $a['id_agencia'];
+                        }
+                        if ($ph) {
+                            $extra = ' AND e.id_agencia IN (' . implode(',', $ph) . ') ';
+                        }
                     }
                 }
                 list($isGersql, $isGerparams) = sqlIsGerente();
                 $rows = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
                      FROM d_estrutura e $where $extra AND $isGersql
-                     ORDER BY label", array_merge(is_array($pp)?$pp:[], $isGerparams));
+                     ORDER BY label", array_merge($pp, $isGerparams));
                 echo json_encode(['gerentes' => $rows]); exit;
             }
 
@@ -193,6 +255,7 @@ try {
             $familias = q($pdo, "
                 SELECT MIN(p.id_familia) AS id, MAX(p.familia) AS label
                 FROM d_produto p
+                WHERE NULLIF(TRIM(p.familia),'') IS NOT NULL
                 GROUP BY UPPER(TRIM(p.familia))
                 ORDER BY label
             ");
@@ -200,6 +263,7 @@ try {
             $indicadores = q($pdo, "
                 SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
                 FROM d_produto p
+                WHERE NULLIF(TRIM(p.indicador),'') IS NOT NULL
                 ORDER BY label
             ");
 
@@ -282,19 +346,26 @@ try {
 
             $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
-            // Produto (família / indicador / subindicador)
+            $fid = numOrNull('familia_id');
+            $iid = numOrNull('indicador_id');
+            $sid = numOrNull('subindicador_id');
+
             $prodCond = '1=1';
-            if (!empty($_GET['subindicador_id'])) {
-                $params[':iid'] = (int) ($_GET['indicador_id'] ?? 0);
-                $params[':sid'] = (int) $_GET['subindicador_id'];
+            if ($sid) {
+                $params[':iid'] = $iid ?? 0;
+                $params[':sid'] = $sid;
                 $prodCond = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
-            } elseif (!empty($_GET['indicador_id'])) {
-                $params[':iid'] = (int) $_GET['indicador_id'];
+            } elseif ($iid) {
+                $params[':iid'] = $iid;
                 $prodCond = 'p.id_indicador = :iid';
             }
-            if (!empty($_GET['familia_id'])) {
-                $params[':fid'] = (int) $_GET['familia_id'];
-                $prodCond = "($prodCond) AND p.id_familia = :fid";
+
+            if ($fid) {
+                $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM d_produto WHERE id_familia = :fid", [':fid' => $fid]);
+                if (!empty($famKey[0]['fam_key'])) {
+                    $prodCond .= ' AND UPPER(TRIM(p.familia)) = :famk';
+                    $params[':famk'] = $famKey[0]['fam_key'];
+                }
             }
 
             $sqlR = "
