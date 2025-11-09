@@ -191,8 +191,9 @@ try {
                        ORDER BY label");
 
             $familias = q($pdo, "
-                SELECT DISTINCT p.id_familia AS id, p.familia AS label
+                SELECT MIN(p.id_familia) AS id, MAX(p.familia) AS label
                 FROM d_produto p
+                GROUP BY UPPER(TRIM(p.familia))
                 ORDER BY label
             ");
 
