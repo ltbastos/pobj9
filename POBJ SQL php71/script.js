@@ -234,6 +234,23 @@ const AGENT_ENDPOINT = (() => {
 // Aqui eu criei atalhos para querySelector e querySelectorAll porque uso isso o tempo todo.
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
+
+const valOrEmpty = (value) => {
+  if (value == null) return "";
+  const text = String(value).trim();
+  return text;
+};
+
+const toQuery = (obj) => Object.entries(obj)
+  .filter(([, value]) => valOrEmpty(value) !== '')
+  .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(valOrEmpty(value))}`)
+  .join('&');
+
+async function fetchJSON(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
 // Aqui eu preparo alguns formatadores (moeda, inteiro, número com 1 casa) para reaproveitar sem recalcular.
 const fmtBRL = new Intl.NumberFormat("pt-BR", { style:"currency", currency:"BRL" });
 const fmtINT = new Intl.NumberFormat("pt-BR");
@@ -7241,6 +7258,8 @@ const state = {
   facts:{ dados:[], campanhas:[], variavel:[], historico:[] },
   dashboard:{ sections:[], summary:{} },
   apiResumo:null,
+  classicRows:null,
+  classicKey:"",
   dashboardVisibleSections:[],
   activeView:"cards",
   resumoMode: readLocalStorageItem(RESUMO_MODE_STORAGE_KEY) === "legacy" ? "legacy" : "cards",
@@ -11517,25 +11536,8 @@ function renderResumoKPI(summary, context = {}) {
       </div>`;
   };
 
-  const cards = [];
-  const resumoApi = state?.apiResumo;
-  const resumoRealizado = resumoApi ? toNumber(resumoApi.realizado) : null;
-  const resumoMeta = resumoApi ? toNumber(resumoApi.meta) : null;
-
-  cards.push(
-    buildCard(
-      "Indicadores",
-      "ti ti-list-check",
-      Number.isFinite(resumoRealizado) ? resumoRealizado : indicadoresAtingidos,
-      Number.isFinite(resumoMeta) ? resumoMeta : indicadoresTotal,
-      Number.isFinite(resumoRealizado) || Number.isFinite(resumoMeta) ? "brl" : "int",
-      Number.isFinite(resumoRealizado) ? resumoRealizado : visibleItemsHitCount,
-      Number.isFinite(resumoMeta) ? resumoMeta : indicadoresTotal,
-      Number.isFinite(resumoRealizado) || Number.isFinite(resumoMeta) ? {
-        labelText: "Indicadores",
-        labelHTML: 'Indicadores <span class="kpi-label-emphasis">(Resumo)</span>'
-      } : undefined
-    ),
+  kpi.innerHTML = [
+    buildCard("Indicadores", "ti ti-list-check", indicadoresAtingidos, indicadoresTotal, "int", visibleItemsHitCount),
     buildCard("Pontos", "ti ti-medal", pontosAtingidos, pontosTotal, "pts", visiblePointsHit),
     buildCard(
       "Variável Estimada",
@@ -11550,12 +11552,283 @@ function renderResumoKPI(summary, context = {}) {
         labelHTML: 'Variável <span class="kpi-label-emphasis">Estimada</span>'
       }
     )
-  );
-
-  kpi.innerHTML = cards.join("");
+  ].join("");
 
   triggerBarAnimation(kpi.querySelectorAll('.hitbar'), shouldAnimateResumo);
   if (resumoAnim) resumoAnim.kpiKey = nextResumoKey;
+}
+
+function collectClassicFilters() {
+  const filters = {};
+  const add = (key, value) => {
+    const normalized = valOrEmpty(value);
+    if (normalized) filters[key] = normalized;
+  };
+  add('segmento_id', $segmento?.value);
+  add('diretoria_id', $diretoria?.value);
+  add('regional_id', $regional?.value);
+  add('agencia_id', $agencia?.value);
+  add('gg_funcional', $gg?.value);
+  add('gerente_funcional', $gerente?.value);
+  const fid = toInt($familia?.value);
+  const iid = toInt($indicador?.value);
+  const sid = toInt($subindicador?.value);
+  if (fid) filters.familia_id = String(fid);
+  if (iid) filters.indicador_id = String(iid);
+  if (sid) filters.subindicador_id = String(sid);
+  return filters;
+}
+
+function buildClassicQueryConfig() {
+  const period = state?.period || getDefaultPeriodRange();
+  const startISO = period?.start || todayISO();
+  const endISO = period?.end || startISO;
+  const filters = collectClassicFilters();
+  const keyObj = { data_ini: startISO, data_fim: endISO };
+  const queryObj = { endpoint: 'tabela_classica', data_ini: startISO, data_fim: endISO };
+  Object.entries(filters).forEach(([key, value]) => {
+    const normalized = valOrEmpty(value);
+    keyObj[key] = normalized || null;
+    if (normalized) {
+      queryObj[key] = normalized;
+    }
+  });
+  return { url: `${API_BASE}?${toQuery(queryObj)}`, cacheKey: JSON.stringify(keyObj) };
+}
+
+function formatClassicValue(value) {
+  const num = Number.isFinite(value) ? value : toNumber(value);
+  return fmtBRL.format(num || 0);
+}
+
+function buildClassicTree(rows = []) {
+  const families = [];
+  const familyMap = new Map();
+
+  const ensureFamily = (id) => {
+    const key = id != null ? `fam-${id}` : `fam-auto-${familyMap.size}`;
+    if (!familyMap.has(key)) {
+      const fam = {
+        id: id != null ? id : null,
+        key,
+        uid: `fam-${familyMap.size}`,
+        label: '',
+        meta: 0,
+        realizado: 0,
+        indicators: [],
+        indicatorMap: new Map()
+      };
+      familyMap.set(key, fam);
+      families.push(fam);
+    }
+    return familyMap.get(key);
+  };
+
+  const ensureIndicator = (fam, id) => {
+    const map = fam.indicatorMap;
+    const key = id != null ? `ind-${id}` : `ind-auto-${map.size}`;
+    if (!map.has(key)) {
+      const indicator = {
+        id: id != null ? id : null,
+        key,
+        uid: `${fam.uid}-ind-${map.size}`,
+        label: '',
+        meta: 0,
+        realizado: 0,
+        subs: []
+      };
+      map.set(key, indicator);
+      fam.indicators.push(indicator);
+    }
+    return map.get(key);
+  };
+
+  rows.forEach(row => {
+    if (!row) return;
+    const fam = ensureFamily(row.id_familia ?? null);
+    if (row.nivel === 'familia') {
+      if (row.label) fam.label = row.label;
+      if (row.meta != null) fam.meta = toNumber(row.meta);
+      if (row.realizado != null) fam.realizado = toNumber(row.realizado);
+      return;
+    }
+    const indicator = ensureIndicator(fam, row.id_indicador ?? null);
+    if (row.nivel === 'indicador') {
+      if (row.label) indicator.label = row.label;
+      if (row.meta != null) indicator.meta = toNumber(row.meta);
+      if (row.realizado != null) indicator.realizado = toNumber(row.realizado);
+      return;
+    }
+    if (row.nivel === 'sub') {
+      indicator.subs.push({
+        id: row.id_subindicador != null ? row.id_subindicador : null,
+        label: row.label || '—',
+        meta: toNumber(row.meta),
+        realizado: toNumber(row.realizado),
+        uid: `${indicator.uid}-sub-${indicator.subs.length}`
+      });
+    }
+  });
+
+  families.forEach(fam => {
+    if (!fam.label) fam.label = fam.id != null ? `Família ${fam.id}` : 'Família';
+    fam.indicators.forEach(ind => {
+      if (!ind.label) ind.label = ind.id != null ? `Indicador ${ind.id}` : 'Indicador';
+    });
+  });
+
+  return families;
+}
+
+function buildClassicSectionHTML(fam) {
+  const safeLabel = escapeHTML(fam.label || 'Família');
+  const metaLabel = escapeHTML(formatClassicValue(fam.meta));
+  const realLabel = escapeHTML(formatClassicValue(fam.realizado));
+  const sectionId = escapeHTML(fam.uid || String(fam.id ?? 'familia'));
+
+  let bodyRows = '';
+  fam.indicators.forEach(ind => {
+    const hasSubs = Array.isArray(ind.subs) && ind.subs.length > 0;
+    const indicatorMeta = escapeHTML(formatClassicValue(ind.meta));
+    const indicatorReal = escapeHTML(formatClassicValue(ind.realizado));
+    const indicatorLabel = escapeHTML(ind.label || 'Indicador');
+    const indicatorId = escapeHTML(ind.uid || `${sectionId}-ind`);
+    const toggleHTML = hasSubs
+      ? `<button type="button" class="resumo-legacy__prod-toggle" aria-expanded="false"><i class="ti ti-chevron-right resumo-legacy__prod-toggle-icon" aria-hidden="true"></i><span class="resumo-legacy__prod-name">${indicatorLabel}</span></button>`
+      : `<span class="resumo-legacy__prod-name">${indicatorLabel}</span>`;
+
+    bodyRows += `
+<tr class="resumo-legacy__row resumo-legacy__row--indicator${hasSubs ? ' has-children' : ''}" data-indicador="${indicatorId}">
+  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod">${toggleHTML}</div></td>
+  <td class="resumo-legacy__col--meta">${indicatorMeta}</td>
+  <td class="resumo-legacy__col--real">${indicatorReal}</td>
+</tr>`;
+
+    if (hasSubs) {
+      ind.subs.forEach(sub => {
+        const subLabel = escapeHTML(sub.label || '—');
+        const subMeta = escapeHTML(formatClassicValue(sub.meta));
+        const subReal = escapeHTML(formatClassicValue(sub.realizado));
+        bodyRows += `
+<tr class="resumo-legacy__row resumo-legacy__child-row" data-parent="${indicatorId}" hidden>
+  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod resumo-legacy__prod--child"><span class="resumo-legacy__prod-name">${subLabel}</span></div></td>
+  <td class="resumo-legacy__col--meta">${subMeta}</td>
+  <td class="resumo-legacy__col--real">${subReal}</td>
+</tr>`;
+      });
+    }
+  });
+
+  if (!bodyRows) {
+    bodyRows = `
+<tr class="resumo-legacy__row">
+  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod"><span class="resumo-legacy__prod-name">Sem indicadores</span></div></td>
+  <td class="resumo-legacy__col--meta">${metaLabel}</td>
+  <td class="resumo-legacy__col--real">${realLabel}</td>
+</tr>`;
+  }
+
+  return `
+<section class="resumo-legacy__section card card--legacy" data-familia="${sectionId}">
+  <header class="resumo-legacy__head">
+    <div class="resumo-legacy__heading">
+      <div class="resumo-legacy__title-row">
+        <span class="resumo-legacy__name">${safeLabel}</span>
+      </div>
+    </div>
+    <div class="resumo-legacy__stats">
+      <div class="resumo-legacy__stat"><span class="resumo-legacy__stat-label">Meta</span><strong class="resumo-legacy__stat-value">${metaLabel}</strong></div>
+      <div class="resumo-legacy__stat"><span class="resumo-legacy__stat-label">Realizado</span><strong class="resumo-legacy__stat-value">${realLabel}</strong></div>
+    </div>
+  </header>
+  <div class="resumo-legacy__table-wrapper">
+    <table class="resumo-legacy__table">
+      <thead>
+        <tr>
+          <th scope="col">Indicador / Subindicador</th>
+          <th scope="col" class="resumo-legacy__col--meta">Meta</th>
+          <th scope="col" class="resumo-legacy__col--real">Realizado</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${bodyRows}
+      </tbody>
+    </table>
+  </div>
+</section>`;
+}
+
+function renderClassicTable(rows = []) {
+  const host = $("#resumo-legacy");
+  if (!host) return;
+
+  if (!Array.isArray(rows) || !rows.length) {
+    host.innerHTML = `<div class="resumo-legacy__empty">Nenhum indicador encontrado para os filtros selecionados.</div>`;
+    return;
+  }
+
+  const families = buildClassicTree(rows);
+  if (!families.length) {
+    host.innerHTML = `<div class="resumo-legacy__empty">Nenhum indicador encontrado para os filtros selecionados.</div>`;
+    return;
+  }
+
+  const sections = families.map(buildClassicSectionHTML).join('\n');
+  host.innerHTML = sections;
+  wireClassicTableToggles(host);
+}
+
+function wireClassicTableToggles(host) {
+  host.querySelectorAll('.resumo-legacy__prod-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      const next = !expanded;
+      btn.setAttribute('aria-expanded', String(next));
+      const icon = btn.querySelector('.resumo-legacy__prod-toggle-icon');
+      if (icon) {
+        icon.className = `ti ${next ? 'ti-chevron-down' : 'ti-chevron-right'} resumo-legacy__prod-toggle-icon`;
+      }
+      const row = btn.closest('tr');
+      if (row) row.classList.toggle('is-expanded', next);
+      const indicatorId = row?.dataset.indicador;
+      if (!indicatorId) return;
+      host.querySelectorAll(`.resumo-legacy__child-row[data-parent="${indicatorId}"]`).forEach(child => {
+        if (next) {
+          child.removeAttribute('hidden');
+          child.classList.add('is-visible');
+        } else {
+          child.setAttribute('hidden', '');
+          child.classList.remove('is-visible');
+        }
+      });
+    });
+  });
+}
+
+function updateClassicViewFromApi(force = false) {
+  const host = $("#resumo-legacy");
+  if (!host) return;
+
+  const { url, cacheKey } = buildClassicQueryConfig();
+  if (!force && state.classicKey === cacheKey && Array.isArray(state.classicRows)) {
+    renderClassicTable(state.classicRows);
+    return;
+  }
+
+  state.classicKey = cacheKey;
+  host.innerHTML = `<div class="resumo-legacy__empty">Carregando visão clássica…</div>`;
+
+  fetchJSON(url)
+    .then(data => {
+      const rows = Array.isArray(data?.rows) ? data.rows : [];
+      state.classicRows = rows;
+      renderClassicTable(rows);
+    })
+    .catch(error => {
+      console.warn('Falha ao carregar visão clássica.', error);
+      state.classicRows = null;
+      host.innerHTML = `<div class="resumo-legacy__empty">Não foi possível carregar a visão clássica.</div>`;
+    });
 }
 
 function buildResumoLegacyAnnualDataset(sections = []) {
@@ -12723,6 +12996,9 @@ function setResumoMode(mode, { persist = true } = {}) {
     if (persist) writeLocalStorageItem(RESUMO_MODE_STORAGE_KEY, normalized);
   }
   applyResumoMode(normalized);
+  if (normalized === "legacy") {
+    updateClassicViewFromApi();
+  }
 }
 
 function setupResumoModeToggle() {
@@ -13636,6 +13912,7 @@ function renderFamilias(sections, summary){
   const sectionsForLegacy = legacySections.length ? legacySections : visibleSections;
   state.dashboardVisibleSections = sectionsForLegacy;
   renderResumoLegacyTable(sectionsForLegacy, summary, visibleSections);
+  updateClassicViewFromApi();
 
   applyResumoMode(state.resumoMode || "cards");
 

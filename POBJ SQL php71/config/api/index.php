@@ -66,6 +66,172 @@ try {
       return $value === '' ? null : $value;
     }
 
+    function obterTabelaClassica(PDO $pdo, array $params, string $T_ESTR, string $T_PROD, string $T_FR, string $T_FM, string $T_CAL) {
+      $sql = <<<SQL
+WITH
+escopo AS (
+  SELECT e.funcional
+  FROM {$T_ESTR} e
+  WHERE 1=1
+    AND (:segmento_id IS NULL OR e.id_segmento = :segmento_id)
+    AND (:diretoria_id IS NULL OR e.id_diretoria = :diretoria_id)
+    AND (:regional_id IS NULL OR e.id_regional = :regional_id)
+    AND (:agencia_id IS NULL OR e.id_agencia = :agencia_id)
+    AND (
+      :gg_funcional IS NULL OR e.funcional IN (
+        SELECT g.funcional
+        FROM {$T_ESTR} gg
+        JOIN {$T_ESTR} g ON g.id_agencia = gg.id_agencia
+        WHERE gg.funcional = :gg_funcional
+      )
+    )
+    AND (:gerente_funcional IS NULL OR e.funcional = :gerente_funcional)
+),
+prod AS (
+  SELECT id_familia, TRIM(familia) AS familia,
+         id_indicador, TRIM(indicador) AS indicador,
+         id_subindicador, NULLIF(TRIM(subindicador),'') AS subindicador
+  FROM {$T_PROD}
+),
+r AS (
+  SELECT p.id_familia, p.familia,
+         p.id_indicador, p.indicador,
+         p.id_subindicador, p.subindicador,
+         SUM(fr.realizado) AS realizado
+  FROM {$T_FR} fr
+  JOIN {$T_CAL} c ON c.data = fr.data_realizado
+  JOIN prod p ON p.id_indicador = fr.id_indicador
+             AND (p.id_subindicador <=> fr.id_subindicador)
+  JOIN escopo s ON s.funcional = fr.funcional
+  WHERE c.data BETWEEN :data_ini AND :data_fim
+    AND (:familia_id IS NULL OR p.id_familia = :familia_id)
+    AND (:indicador_id IS NULL OR p.id_indicador = :indicador_id)
+    AND (:subindicador_id IS NULL OR p.id_subindicador = :subindicador_id)
+  GROUP BY p.id_familia, p.familia, p.id_indicador, p.indicador, p.id_subindicador, p.subindicador
+),
+m AS (
+  SELECT p.id_familia, p.familia,
+         p.id_indicador, p.indicador,
+         p.id_subindicador, p.subindicador,
+         SUM(fm.meta_mensal) AS meta
+  FROM {$T_FM} fm
+  JOIN {$T_CAL} c ON c.data = fm.data_meta
+  JOIN prod p ON p.id_indicador = fm.id_indicador
+             AND (p.id_subindicador <=> fm.id_subindicador)
+  JOIN escopo s ON s.funcional = fm.funcional
+  WHERE c.data BETWEEN DATE_FORMAT(:data_fim,'%Y-%m-01') AND :data_fim
+    AND (:familia_id IS NULL OR p.id_familia = :familia_id)
+    AND (:indicador_id IS NULL OR p.id_indicador = :indicador_id)
+    AND (:subindicador_id IS NULL OR p.id_subindicador = :subindicador_id)
+  GROUP BY p.id_familia, p.familia, p.id_indicador, p.indicador, p.id_subindicador, p.subindicador
+),
+km AS (
+  SELECT
+    r.id_familia,
+    r.familia,
+    r.id_indicador,
+    r.indicador,
+    r.id_subindicador,
+    r.subindicador,
+    COALESCE(r.realizado, 0) AS realizado_total,
+    COALESCE(m.meta, 0)      AS meta_total
+  FROM r
+  LEFT JOIN m
+    ON m.id_familia <=> r.id_familia
+   AND m.id_indicador <=> r.id_indicador
+   AND m.id_subindicador <=> r.id_subindicador
+
+  UNION ALL
+
+  SELECT
+    m.id_familia,
+    m.familia,
+    m.id_indicador,
+    m.indicador,
+    m.id_subindicador,
+    m.subindicador,
+    COALESCE(r.realizado, 0) AS realizado_total,
+    COALESCE(m.meta, 0)      AS meta_total
+  FROM m
+  LEFT JOIN r
+    ON r.id_familia <=> m.id_familia
+   AND r.id_indicador <=> m.id_indicador
+   AND r.id_subindicador <=> m.id_subindicador
+  WHERE r.id_familia IS NULL
+),
+fam AS (
+  SELECT
+    'familia' AS nivel,
+    id_familia,
+    NULL AS id_indicador,
+    NULL AS id_subindicador,
+    familia AS label,
+    SUM(realizado_total) AS realizado_total,
+    SUM(meta_total)      AS meta_total
+  FROM km
+  GROUP BY id_familia, familia
+),
+ind AS (
+  SELECT
+    'indicador' AS nivel,
+    id_familia,
+    id_indicador,
+    NULL AS id_subindicador,
+    indicador AS label,
+    SUM(realizado_total) AS realizado_total,
+    SUM(meta_total)      AS meta_total
+  FROM km
+  GROUP BY id_familia, id_indicador, indicador
+),
+sub AS (
+  SELECT
+    'sub' AS nivel,
+    id_familia,
+    id_indicador,
+    id_subindicador,
+    subindicador AS label,
+    SUM(realizado_total) AS realizado_total,
+    SUM(meta_total)      AS meta_total
+  FROM km
+  WHERE subindicador IS NOT NULL
+  GROUP BY id_familia, id_indicador, id_subindicador, subindicador
+)
+SELECT * FROM fam
+UNION ALL
+SELECT * FROM ind
+UNION ALL
+SELECT * FROM sub
+ORDER BY
+  CASE nivel WHEN 'familia' THEN 1 WHEN 'indicador' THEN 2 ELSE 3 END,
+  label
+SQL;
+
+      $stmt = $pdo->prepare($sql);
+      foreach ($params as $key => $value) {
+        if ($value === null || $value === '') {
+          $stmt->bindValue($key, null, PDO::PARAM_NULL);
+        } elseif (is_int($value)) {
+          $stmt->bindValue($key, $value, PDO::PARAM_INT);
+        } else {
+          $stmt->bindValue($key, $value);
+        }
+      }
+      $stmt->execute();
+      $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+      return array_map(static function (array $row): array {
+        return [
+          'nivel' => $row['nivel'] ?? '',
+          'id_familia' => isset($row['id_familia']) ? (int) $row['id_familia'] : null,
+          'id_indicador' => isset($row['id_indicador']) ? (int) $row['id_indicador'] : null,
+          'id_subindicador' => isset($row['id_subindicador']) ? (int) $row['id_subindicador'] : null,
+          'label' => $row['label'] ?? '',
+          'meta' => (float) ($row['meta_total'] ?? 0),
+          'realizado' => (float) ($row['realizado_total'] ?? 0),
+        ];
+      }, $rows);
+    }
+
     function buildWhereEstrutura(array $get, &$params) {
       $where = ['1=1'];
       if (!empty($get['segmento_id']))   { $where[] = 'e.id_segmento = :segmento_id';   $params[':segmento_id']   = $get['segmento_id']; }
@@ -432,6 +598,41 @@ try {
                 ],
                 'updated_at' => date('c'),
             ]);
+
+        case 'tabela_classica':
+            $ini = qnull('data_ini');
+            $fim = qnull('data_fim');
+            if (!$ini || !$fim) {
+                err('data_ini/data_fim obrigatórios');
+            }
+
+            $seg = qnull('segmento_id');
+            $dir = qnull('diretoria_id');
+            $reg = qnull('regional_id');
+            $age = qnull('agencia_id');
+            $gg  = qnull('gg_funcional');
+            $ger = qnull('gerente_funcional');
+
+            $fid = numOrNull('familia_id');
+            $iid = numOrNull('indicador_id');
+            $sid = numOrNull('subindicador_id');
+
+            $params = [
+                ':data_ini' => $ini,
+                ':data_fim' => $fim,
+                ':segmento_id' => $seg,
+                ':diretoria_id' => $dir,
+                ':regional_id' => $reg,
+                ':agencia_id' => $age,
+                ':gg_funcional' => $gg,
+                ':gerente_funcional' => $ger,
+                ':familia_id' => $fid,
+                ':indicador_id' => $iid,
+                ':subindicador_id' => $sid,
+            ];
+
+            $rows = obterTabelaClassica($pdo, $params, $T_ESTR, $T_PROD, $T_FR, $T_FM, $T_CAL);
+            ok(['rows' => $rows]);
 
         case 'linhas_classicas':
             $ini = qnull('data_ini');
