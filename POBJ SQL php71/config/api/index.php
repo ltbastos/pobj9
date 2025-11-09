@@ -14,6 +14,42 @@ try {
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
     ]);
 
+    // --- [POBJ] helpers de filtros ---
+    function envArray($key, $default = []) {
+      $v = getenv($key);
+      if (!$v) return $default;
+      return array_values(array_filter(array_map('trim', explode(',', $v))));
+    }
+
+    function q(PDO $pdo, $sql, $params = []) {
+      $st = $pdo->prepare($sql);
+      foreach ($params as $k => $v) $st->bindValue(is_int($k)?$k+1:$k, $v);
+      $st->execute();
+      return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    function buildWhereEstrutura(array $get, &$params) {
+      $where = ['1=1'];
+      if (!empty($get['segmento_id']))   { $where[] = 'e.id_segmento = :segmento_id';   $params[':segmento_id']   = $get['segmento_id']; }
+      if (!empty($get['diretoria_id']))  { $where[] = 'e.id_diretoria = :diretoria_id'; $params[':diretoria_id']  = $get['diretoria_id']; }
+      if (!empty($get['regional_id']))   { $where[] = 'e.id_regional  = :regional_id';  $params[':regional_id']   = $get['regional_id']; }
+      if (!empty($get['agencia_id']))    { $where[] = 'e.id_agencia   = :agencia_id';   $params[':agencia_id']    = $get['agencia_id']; }
+      return 'WHERE '.implode(' AND ', $where);
+    }
+
+    function sqlIsGG() {
+      $ids = envArray('GG_IDS', ['GG','GERENTE_GESTAO']);
+      $in = implode(',', array_fill(0, count($ids), '?'));
+      // retorna [sql, params]
+      return ['(e.id_cargo IN ('.$in.') OR e.cargo LIKE ?)', array_merge($ids, ['%gest%'])];
+    }
+
+    function sqlIsGerente() {
+      $ids = envArray('GERENTE_IDS', ['GERENTE']);
+      $in = implode(',', array_fill(0, count($ids), '?'));
+      return ['(e.id_cargo IN ('.$in.') OR e.cargo LIKE ?)', array_merge($ids, ['gerente%'])];
+    }
+
     $endpoint = $_GET['endpoint'] ?? '';
 
     $json = static function ($data) {
@@ -27,85 +63,72 @@ try {
         exit;
     };
 
-    $q = static function (string $sql, array $bind = []) use ($pdo) {
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($bind);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    };
-
     switch ($endpoint) {
         case 'health':
             $json(['status' => 'ok']);
 
         case 'filtros':
             $nivel = $_GET['nivel'] ?? '';
-            switch ($nivel) {
-                case 'segmentos':
-                    $json($q(
-                        'SELECT DISTINCT id_segmento AS id, segmento AS label
-                         FROM d_estrutura
-                         WHERE id_segmento IS NOT NULL AND segmento IS NOT NULL
-                         ORDER BY label'
-                    ));
+            $params = [];
+            $where = buildWhereEstrutura($_GET, $params);
 
-                case 'diretorias':
-                    $json($q(
-                        'SELECT DISTINCT id_diretoria AS id, diretoria AS label
-                         FROM d_estrutura
-                         WHERE id_diretoria IS NOT NULL AND diretoria IS NOT NULL
-                         ORDER BY label'
-                    ));
-
-                case 'regionais':
-                    $json($q(
-                        'SELECT DISTINCT id_regional AS id, regional AS label
-                         FROM d_estrutura
-                         WHERE id_regional IS NOT NULL AND regional IS NOT NULL
-                         ORDER BY label'
-                    ));
-
-                case 'agencias':
-                    $json($q(
-                        'SELECT DISTINCT id_agencia AS id, agencia AS label, porte
-                         FROM d_estrutura
-                         WHERE id_agencia IS NOT NULL AND agencia IS NOT NULL
-                         ORDER BY label'
-                    ));
-
-                case 'ggestoes':
-                    $json($q(
-                        "SELECT DISTINCT funcional AS id, nome AS label
-                         FROM d_estrutura
-                         WHERE cargo LIKE 'Gerente de Gestao%' OR cargo LIKE 'Gerente de Gestão%'
-                         ORDER BY label"
-                    ));
-
-                case 'gerentes':
-                    $json($q(
-                        "SELECT DISTINCT funcional AS id, nome AS label
-                         FROM d_estrutura
-                         WHERE cargo LIKE 'Gerente%' AND cargo NOT LIKE 'Gerente de Gest%'
-                         ORDER BY label"
-                    ));
-
-                case 'status_indicadores':
-                    $rows = $q('SELECT id, status AS label FROM d_status_indicadores ORDER BY id');
-                    if (!$rows) {
-                        $rows = [
-                            ['id' => '01', 'label' => 'Atingido'],
-                            ['id' => '02', 'label' => 'Não Atingido'],
-                            ['id' => '03', 'label' => 'Todos'],
-                        ];
-                    }
-                    $json($rows);
-
-                default:
-                    $jsonError('nivel inválido');
+            if ($nivel === 'diretorias') {
+                $rows = q($pdo, "SELECT DISTINCT e.id_diretoria AS id, e.diretoria AS label
+                     FROM d_estrutura e $where
+                     AND e.id_diretoria IS NOT NULL AND e.diretoria IS NOT NULL
+                     ORDER BY label", $params);
+                echo json_encode(['diretorias' => $rows]); exit;
             }
-            break;
+
+            if ($nivel === 'regionais') {
+                $rows = q($pdo, "SELECT DISTINCT e.id_regional AS id, e.regional AS label, e.id_diretoria
+                     FROM d_estrutura e $where
+                     AND e.id_regional IS NOT NULL AND e.regional IS NOT NULL
+                     ORDER BY label", $params);
+                echo json_encode(['regionais' => $rows]); exit;
+            }
+
+            if ($nivel === 'agencias') {
+                $rows = q($pdo, "SELECT DISTINCT e.id_agencia AS id, e.agencia AS label, e.id_regional
+                     FROM d_estrutura e $where
+                     AND e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
+                     ORDER BY label", $params);
+                echo json_encode(['agencias' => $rows]); exit;
+            }
+
+            if ($nivel === 'ggestoes') {
+                // lista GG no escopo filtrado
+                list($isGGsql, $isGGparams) = sqlIsGG();
+                $rows = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
+                     FROM d_estrutura e $where AND $isGGsql
+                     ORDER BY label", array_merge($params, $isGGparams));
+                echo json_encode(['ggestoes' => $rows]); exit;
+            }
+
+            if ($nivel === 'gerentes') {
+                // Se veio gg_funcional: limitar às agências do GG
+                $extra = '';
+                $pp = $params;
+                if (!empty($_GET['gg_funcional'])) {
+                    $agenciasDoGG = q($pdo, "SELECT DISTINCT id_agencia FROM d_estrutura WHERE funcional = :gg", [':gg'=>$_GET['gg_funcional']]);
+                    if ($agenciasDoGG) {
+                        $in = implode(',', array_fill(0, count($agenciasDoGG), '?'));
+                        $extra = " AND e.id_agencia IN ($in) ";
+                        foreach ($agenciasDoGG as $a) $pp[] = $a['id_agencia'];
+                    }
+                }
+                list($isGersql, $isGerparams) = sqlIsGerente();
+                $rows = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
+                     FROM d_estrutura e $where $extra AND $isGersql
+                     ORDER BY label", array_merge(is_array($pp)?$pp:[], $isGerparams));
+                echo json_encode(['gerentes' => $rows]); exit;
+            }
+
+            http_response_code(400);
+            echo json_encode(['error'=>'nivel inválido']); exit;
 
         case 'status_indicadores':
-            $rows = $q('SELECT id, status FROM d_status_indicadores ORDER BY id');
+            $rows = q($pdo, 'SELECT id, status FROM d_status_indicadores ORDER BY id');
             if (!$rows) {
                 $rows = [
                     ['id' => '01', 'status' => 'Atingido'],
@@ -115,46 +138,55 @@ try {
             }
             $json(['rows' => $rows]);
 
-        case 'bootstrap':
-            $payload = [];
-            $payload['segmentos'] = $q(
-                'SELECT DISTINCT id_segmento AS id, segmento AS nome
-                 FROM d_estrutura
-                 WHERE id_segmento IS NOT NULL AND segmento IS NOT NULL
-                 ORDER BY nome'
-            );
-            $payload['diretorias'] = $q(
-                'SELECT DISTINCT id_diretoria AS id, diretoria AS nome
-                 FROM d_estrutura
-                 WHERE id_diretoria IS NOT NULL AND diretoria IS NOT NULL
-                 ORDER BY nome'
-            );
-            $payload['regionais'] = $q(
-                'SELECT DISTINCT id_regional AS id, regional AS nome
-                 FROM d_estrutura
-                 WHERE id_regional IS NOT NULL AND regional IS NOT NULL
-                 ORDER BY nome'
-            );
-            $payload['agencias'] = $q(
-                'SELECT DISTINCT id_agencia AS id, agencia AS nome, porte
-                 FROM d_estrutura
-                 WHERE id_agencia IS NOT NULL AND agencia IS NOT NULL
-                 ORDER BY nome'
-            );
-            $payload['ggestoes'] = $q(
-                "SELECT DISTINCT funcional AS id, nome
-                 FROM d_estrutura
-                 WHERE cargo LIKE 'Gerente de Gestao%' OR cargo LIKE 'Gerente de Gestão%'
-                 ORDER BY nome"
-            );
-            $payload['gerentes'] = $q(
-                "SELECT DISTINCT funcional AS id, nome
-                 FROM d_estrutura
-                 WHERE cargo LIKE 'Gerente%' AND cargo NOT LIKE 'Gerente de Gest%'
-                 ORDER BY nome"
-            );
-            $payload['statusIndicadores'] = $q('SELECT id, status FROM d_status_indicadores ORDER BY id');
-            $json($payload);
+        case 'bootstrap': {
+            $params = [];
+            $where = buildWhereEstrutura($_GET, $params);
+
+            $segmentos = q($pdo, "SELECT DISTINCT e.id_segmento AS id, e.segmento AS label
+                        FROM d_estrutura e
+                        WHERE e.id_segmento IS NOT NULL AND e.segmento IS NOT NULL
+                        ORDER BY label");
+
+            $diretorias = q($pdo, "SELECT DISTINCT e.id_diretoria AS id, e.diretoria AS label
+                         FROM d_estrutura e
+                         WHERE e.id_diretoria IS NOT NULL AND e.diretoria IS NOT NULL
+                         ORDER BY label");
+
+            $regionais = q($pdo, "SELECT DISTINCT e.id_regional AS id, e.regional AS label, e.id_diretoria
+                        FROM d_estrutura e
+                        WHERE e.id_regional IS NOT NULL AND e.regional IS NOT NULL
+                        ORDER BY label");
+
+            $agencias = q($pdo, "SELECT DISTINCT e.id_agencia AS id, e.agencia AS label, e.id_regional
+                       FROM d_estrutura e
+                       WHERE e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
+                       ORDER BY label");
+
+            // GG
+            list($isGGsql, $isGGparams) = sqlIsGG();
+            $ggestoes = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
+                       FROM d_estrutura e
+                       WHERE $isGGsql
+                       ORDER BY label", $isGGparams);
+
+            // Gerentes
+            list($isGersql, $isGerparams) = sqlIsGerente();
+            $gerentes = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
+                       FROM d_estrutura e
+                       WHERE $isGersql
+                       ORDER BY label", $isGerparams);
+
+            echo json_encode([
+                'segmentos'   => $segmentos,
+                'diretorias'  => $diretorias,
+                'regionais'   => $regionais,
+                'agencias'    => $agencias,
+                'ggestoes'    => $ggestoes,
+                'gerentes'    => $gerentes,
+                'updated_at'  => date('c'),
+            ]);
+            exit;
+        }
 
         case 'resumo':
             $seg = trim($_GET['segmento_id'] ?? '');
@@ -212,7 +244,7 @@ try {
                 $indicadorFilterMeta = ' AND m.id_indicador = :id_indicador';
             }
 
-            $real = $q(
+            $real = q($pdo,
                 "SELECT SUM(r.realizado) AS total_realizado
                  FROM f_realizado r
                  JOIN d_calendario c ON c.data = r.data_realizado
@@ -221,7 +253,7 @@ try {
                 $bind
             );
 
-            $meta = $q(
+            $meta = q($pdo,
                 "SELECT SUM(m.meta_mensal) AS total_meta
                  FROM f_meta m
                  JOIN d_calendario c ON c.data = m.data_meta

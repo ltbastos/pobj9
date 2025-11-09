@@ -66,6 +66,7 @@ const DATA_SOURCE = "sql";
 const API_PATH = typeof window !== "undefined" && window.API_URL
   ? String(window.API_URL)
   : "config/api/index.php";
+const API_BASE = 'config/api/index.php';
 const DEFAULT_HTTP_BASE = "http://localhost/POBJ%20SQL%20php71/";
 const API_HTTP_BASE = typeof window !== "undefined" && window.API_HTTP_BASE
   ? String(window.API_HTTP_BASE)
@@ -4453,12 +4454,12 @@ async function loadBaseData(){
           leadsRaw: payload?.leads || [],
           detalhesRaw: payload?.detalhes || [],
           historicoRaw: payload?.historico || [],
-          dimSegmentosRaw: payload?.dimSegmentos || payload?.segmentosDim || [],
-          dimDiretoriasRaw: payload?.dimDiretorias || payload?.diretoriasDim || [],
-          dimRegionaisRaw: payload?.dimRegionais || payload?.regionaisDim || [],
-          dimAgenciasRaw: payload?.dimAgencias || payload?.agenciasDim || [],
-          dimGerentesGestaoRaw: payload?.dimGerentesGestao || payload?.gerentesGestaoDim || [],
-          dimGerentesRaw: payload?.dimGerentes || payload?.gerentesDim || [],
+          dimSegmentosRaw: payload?.dimSegmentos || payload?.segmentosDim || payload?.segmentos || [],
+          dimDiretoriasRaw: payload?.dimDiretorias || payload?.diretoriasDim || payload?.diretorias || [],
+          dimRegionaisRaw: payload?.dimRegionais || payload?.regionaisDim || payload?.regionais || [],
+          dimAgenciasRaw: payload?.dimAgencias || payload?.agenciasDim || payload?.agencias || [],
+          dimGerentesGestaoRaw: payload?.dimGerentesGestao || payload?.gerentesGestaoDim || payload?.ggestoes || [],
+          dimGerentesRaw: payload?.dimGerentes || payload?.gerentesDim || payload?.gerentes || [],
         });
       }
 
@@ -6352,6 +6353,81 @@ function makeRandomForMetric(metric){
 /* ===== Aqui eu centralizo o carregamento de dados (API ou CSV local) ===== */
 // Aqui eu faço uma chamada GET simples contra a API com tratamento básico de erro.
 async function apiGet(path, params){
+  const fetchJson = async (targetUrl) => {
+    let response;
+    try {
+      response = await fetch(targetUrl, { cache: "no-store" });
+    } catch (err) {
+      const error = new Error("Não foi possível contactar a API PHP em config/api/index.php.");
+      error.cause = err;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    let text;
+    try {
+      text = await response.text();
+    } catch (err) {
+      const error = new Error("Falha ao ler a resposta da API PHP.");
+      error.cause = err;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    let json;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch (err) {
+      const error = new Error("A API PHP retornou um JSON inválido.");
+      error.cause = err;
+      error.responseText = text;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    if (!response.ok) {
+      const message = (json && typeof json === "object" && json.error)
+        ? String(json.error)
+        : `Falha ao carregar dados (HTTP ${response.status})`;
+      const error = new Error(message);
+      error.code = "HTTP_ERROR";
+      error.status = response.status;
+      error.payload = json;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    if (json && typeof json === "object" && json.error) {
+      const error = new Error(String(json.error));
+      error.code = "API_ERROR";
+      error.payload = json;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    return json;
+  };
+
+  if ((params === undefined || params === null) && typeof path === "string") {
+    const trimmed = path.trim();
+    if (trimmed) {
+      const lower = trimmed.toLowerCase();
+      const isAbsolute = lower.startsWith("http://") || lower.startsWith("https://");
+      const isRelativePhp = trimmed.startsWith(API_BASE) || trimmed.startsWith("config/") || trimmed.startsWith("./") || trimmed.startsWith("../");
+      const hasQuery = trimmed.includes("?");
+      const isQueryOnly = trimmed.startsWith("?");
+      if (isAbsolute) {
+        return fetchJson(trimmed);
+      }
+      if (isQueryOnly) {
+        return fetchJson(`${API_BASE}${trimmed}`);
+      }
+      if (hasQuery || isRelativePhp) {
+        return fetchJson(trimmed);
+      }
+    }
+  }
+
   let baseUrl;
   try {
     baseUrl = resolveApiBaseUrl();
@@ -6361,54 +6437,23 @@ async function apiGet(path, params){
     throw error;
   }
   const { url } = prepareApiUrl(baseUrl, path, params);
+  return fetchJson(url.toString());
+}
 
-  let response;
-  try {
-    response = await fetch(url, { cache: "no-store" });
-  } catch (err) {
-    const error = new Error("Não foi possível contactar a API PHP em config/api/index.php.");
-    error.cause = err;
-    throw error;
-  }
+function setOptions(selectEl, items, emptyLabel='Todos') {
+  if (!selectEl) return;
+  const opts = (Array.isArray(items)?items:[]).map(it => {
+    const id = String(it.id ?? it.value ?? it.funcional ?? '').trim();
+    const label = String(it.label ?? it.nome ?? id).trim();
+    return { value: id, label };
+  }).filter(o => o.value && o.label);
 
-  let text;
-  try {
-    text = await response.text();
-  } catch (err) {
-    const error = new Error("Falha ao ler a resposta da API PHP.");
-    error.cause = err;
-    throw error;
-  }
-
-  let json;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (err) {
-    const error = new Error("A API PHP retornou um JSON inválido.");
-    error.cause = err;
-    error.responseText = text;
-    throw error;
-  }
-
-  if (!response.ok) {
-    const message = (json && typeof json === "object" && json.error)
-      ? String(json.error)
-      : `Falha ao carregar dados (HTTP ${response.status})`;
-    const error = new Error(message);
-    error.code = "HTTP_ERROR";
-    error.status = response.status;
-    error.payload = json;
-    throw error;
-  }
-
-  if (json && typeof json === "object" && json.error) {
-    const error = new Error(String(json.error));
-    error.code = "API_ERROR";
-    error.payload = json;
-    throw error;
-  }
-
-  return json;
+  const prev = selectEl.value;
+  selectEl.innerHTML = '';
+  selectEl.appendChild(new Option(emptyLabel, ''));
+  for (const o of opts) selectEl.appendChild(new Option(o.label, o.value));
+  // preserva opção se ainda existir
+  if (opts.some(o => o.value === prev)) selectEl.value = prev;
 }
 
 // Aqui eu faço uma chamada POST simples contra a API para enviar JSON.
@@ -6509,6 +6554,123 @@ function prepareApiUrl(baseUrl, path, params){
 
   return { url: url.toString() };
 }
+
+const $segmento = document.getElementById('f-segmento');
+const $diretoria = document.getElementById('f-diretoria');
+const $regional  = document.getElementById('f-gerencia');
+const $agencia   = document.getElementById('f-agencia');
+const $gg        = document.getElementById('f-ggestao');
+const $gerente   = document.getElementById('f-gerente');
+
+function qs() {
+  const p = new URLSearchParams();
+  if ($segmento?.value)  p.set('segmento_id', $segmento.value);
+  if ($diretoria?.value) p.set('diretoria_id', $diretoria.value);
+  if ($regional?.value)  p.set('regional_id',  $regional.value);
+  if ($agencia?.value)   p.set('agencia_id',   $agencia.value);
+  if ($gg?.value)        p.set('gg_funcional', $gg.value);
+  return p.toString();
+}
+
+function buildFiltrosUrl(nivel) {
+  const query = qs();
+  const base = `${API_BASE}?endpoint=filtros&nivel=${encodeURIComponent(nivel)}`;
+  return query ? `${base}&${query}` : base;
+}
+
+async function bootstrapFiltros() {
+  try {
+    const data = await apiGet(`${API_BASE}?endpoint=bootstrap`);
+    setOptions($segmento,  data?.segmentos,  'Todos');
+    setOptions($diretoria, data?.diretorias, 'Todas');
+    setOptions($regional,  data?.regionais,  'Todas');
+    setOptions($agencia,   data?.agencias,   'Todas');
+    setOptions($gg,        data?.ggestoes,   'Todos');
+    setOptions($gerente,   data?.gerentes,   'Todos');
+  } catch (error) {
+    console.error('Falha ao carregar filtros iniciais.', error);
+  }
+}
+
+function ensureBootstrapFiltros() {
+  if (typeof document === 'undefined') return;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { void bootstrapFiltros(); });
+  } else {
+    void bootstrapFiltros();
+  }
+}
+
+ensureBootstrapFiltros();
+
+function handleApiError(context, error) {
+  console.error(context, error);
+}
+
+$segmento?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar diretorias.';
+  setOptions($diretoria, [], 'Todas');
+  setOptions($regional,  [], 'Todas');
+  setOptions($agencia,   [], 'Todas');
+  setOptions($gg,        [], 'Todos');
+  setOptions($gerente,   [], 'Todos');
+  try {
+    const d = await apiGet(buildFiltrosUrl('diretorias'));
+    setOptions($diretoria, d?.diretorias, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$diretoria?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar regionais.';
+  setOptions($regional, [], 'Todas');
+  setOptions($agencia,  [], 'Todas');
+  setOptions($gg,       [], 'Todos');
+  setOptions($gerente,  [], 'Todos');
+  try {
+    const r = await apiGet(buildFiltrosUrl('regionais'));
+    setOptions($regional, r?.regionais, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$regional?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar agências.';
+  setOptions($agencia, [], 'Todas');
+  setOptions($gg,      [], 'Todos');
+  setOptions($gerente, [], 'Todos');
+  try {
+    const a = await apiGet(buildFiltrosUrl('agencias'));
+    setOptions($agencia, a?.agencias, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$agencia?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar gerentes de gestão.';
+  setOptions($gg,      [], 'Todos');
+  setOptions($gerente, [], 'Todos');
+  try {
+    const g = await apiGet(buildFiltrosUrl('ggestoes'));
+    setOptions($gg, g?.ggestoes, 'Todos');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$gg?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar gerentes.';
+  setOptions($gerente, [], 'Todos');
+  try {
+    const ge = await apiGet(buildFiltrosUrl('gerentes'));
+    setOptions($gerente, ge?.gerentes, 'Todos');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
 // Aqui eu faço todo o processo de montar os dados consolidados (fatos + metas + campanhas) usados nas telas.
 async function getData(){
   const period = state.period || getDefaultPeriodRange();
