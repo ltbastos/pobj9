@@ -6349,9 +6349,15 @@ function buildResumoParams() {
   if ($agencia?.value)   params.set('agencia_id', $agencia.value);
   if ($gg?.value)        params.set('gg_funcional', $gg.value);
   if ($gerente?.value)   params.set('gerente_funcional', $gerente.value);
-  if ($familia?.value)   params.set('familia_id', $familia.value);
-  if ($indicador?.value) params.set('indicador_id', $indicador.value);
-  if ($subindicador?.value) params.set('subindicador_id', $subindicador.value);
+  if ($familia && $familia.value) {
+    params.set('familia_id', $familia.value);
+  }
+  if ($indicador && $indicador.value) {
+    params.set('indicador_id', $indicador.value);
+  }
+  if ($subindicador && $subindicador.value) {
+    params.set('subindicador_id', $subindicador.value);
+  }
   return params.toString();
 }
 

@@ -281,8 +281,8 @@ try {
 
             $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
+            // Produto (família / indicador / subindicador)
             $prodCond = '1=1';
-
             if (!empty($_GET['subindicador_id'])) {
                 $params[':iid'] = (int) ($_GET['indicador_id'] ?? 0);
                 $params[':sid'] = (int) $_GET['subindicador_id'];
@@ -296,7 +296,7 @@ try {
                 $prodCond = "($prodCond) AND p.id_familia = :fid";
             }
 
-            $sqlReal = "
+            $sqlR = "
                 SELECT SUM(fr.realizado) AS realizado
                 FROM f_realizado fr
                 JOIN d_calendario c ON c.data = fr.data_realizado
@@ -308,9 +308,9 @@ try {
                   AND ($prodCond)
                   $estruturaWhere
             ";
-            $real = q($pdo, $sqlReal, $params);
+            $realizado_total = (float) (q($pdo, $sqlR, $params)[0]['realizado'] ?? 0);
 
-            $sqlMeta = "
+            $sqlM = "
                 SELECT SUM(fm.meta_mensal) AS meta
                 FROM f_meta fm
                 JOIN d_calendario c ON c.data = fm.data_meta
@@ -322,10 +322,7 @@ try {
                   AND ($prodCond)
                   $estruturaWhere
             ";
-            $meta = q($pdo, $sqlMeta, $params);
-
-            $realizado_total = (float) ($real[0]['realizado'] ?? 0);
-            $meta_total = (float) ($meta[0]['meta'] ?? 0);
+            $meta_total = (float) (q($pdo, $sqlM, $params)[0]['meta'] ?? 0);
 
             echo json_encode([
                 'kpi' => [
