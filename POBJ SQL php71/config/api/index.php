@@ -97,13 +97,14 @@ try {
             }
 
             if ($nivel === 'subindicadores') {
+                $iid = (int) ($_GET['indicador_id'] ?? 0);
                 $rows = q($pdo, "
                     SELECT DISTINCT p.id_subindicador AS id, p.subindicador AS label
                     FROM d_produto p
-                    WHERE p.id_indicador = :indicador_id
+                    WHERE p.id_indicador = :iid
                       AND p.id_subindicador IS NOT NULL
                     ORDER BY label
-                ", [':indicador_id' => $_GET['indicador_id'] ?? 0]);
+                ", [':iid' => $iid]);
                 echo json_encode(['subindicadores' => $rows]); exit;
             }
 
@@ -193,17 +194,20 @@ try {
                        WHERE $isGersql
                        ORDER BY label", $isGerparams);
 
-            echo json_encode([
+            $response = [
                 'segmentos'        => $segmentos,
                 'diretorias'       => $diretorias,
                 'regionais'        => $regionais,
                 'agencias'         => $agencias,
                 'ggestoes'         => $ggestoes,
                 'gerentes'         => $gerentes,
-                'indicadores'      => $indicadores,
-                'subindicadores'   => [],
                 'updated_at'       => date('c'),
-            ]);
+            ];
+
+            $response['indicadores'] = $indicadores;
+            $response['subindicadores'] = [];
+
+            echo json_encode($response);
             exit;
         }
 
@@ -256,18 +260,15 @@ try {
 
             $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
-            $prodCondReal = '1=1';
-            $prodCondMeta = '1=1';
+            $prodCond = '1=1';
 
             if ($subIndicadorParam !== '') {
-                $params[':sid'] = (int) $subIndicadorParam;
                 $params[':iid'] = (int) ($indicadorParam !== '' ? $indicadorParam : ($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? 0));
-                $prodCondReal = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
-                $prodCondMeta = $prodCondReal;
+                $params[':sid'] = (int) $subIndicadorParam;
+                $prodCond = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
             } elseif ($indicadorParam !== '') {
                 $params[':iid'] = (int) $indicadorParam;
-                $prodCondReal = 'p.id_indicador = :iid';
-                $prodCondMeta = $prodCondReal;
+                $prodCond = 'p.id_indicador = :iid';
             }
 
             $sqlReal = "
@@ -279,7 +280,7 @@ try {
                  AND p.id_subindicador <=> fr.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fr.funcional
                 WHERE c.data BETWEEN :ini AND :fim
-                  AND ($prodCondReal)
+                  AND ($prodCond)
                   $estruturaWhere
             ";
             $real = q($pdo, $sqlReal, $params);
@@ -293,7 +294,7 @@ try {
                  AND p.id_subindicador <=> fm.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fm.funcional
                 WHERE c.data BETWEEN DATE_FORMAT(:fim,'%Y-%m-01') AND :fim
-                  AND ($prodCondMeta)
+                  AND ($prodCond)
                   $estruturaWhere
             ";
             $meta = q($pdo, $sqlMeta, $params);
