@@ -243,9 +243,6 @@ try {
             $ger = trim($_GET['gerente_funcional'] ?? '');
             $ini = trim($_GET['data_ini'] ?? '');
             $fim = trim($_GET['data_fim'] ?? '');
-            $familiaParam = trim((string)($_GET['familia_id'] ?? $_GET['id_familia'] ?? ''));
-            $indicadorParam = trim((string)($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? ''));
-            $subIndicadorParam = trim((string)($_GET['subindicador_id'] ?? $_GET['id_subindicador'] ?? ''));
 
             if ($ini === '' || $fim === '') {
                 $jsonError('data_ini/data_fim obrigatórios');
@@ -284,20 +281,19 @@ try {
 
             $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
-            $prodSql = '1=1';
+            $prodCond = '1=1';
 
-            if ($subIndicadorParam !== '') {
-                $params[':iid'] = (int) ($indicadorParam !== '' ? $indicadorParam : ($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? 0));
-                $params[':sid'] = (int) $subIndicadorParam;
-                $prodSql = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
-            } elseif ($indicadorParam !== '') {
-                $params[':iid'] = (int) $indicadorParam;
-                $prodSql = 'p.id_indicador = :iid';
+            if (!empty($_GET['subindicador_id'])) {
+                $params[':iid'] = (int) ($_GET['indicador_id'] ?? 0);
+                $params[':sid'] = (int) $_GET['subindicador_id'];
+                $prodCond = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
+            } elseif (!empty($_GET['indicador_id'])) {
+                $params[':iid'] = (int) $_GET['indicador_id'];
+                $prodCond = 'p.id_indicador = :iid';
             }
-
-            if ($familiaParam !== '') {
-                $params[':fid'] = (int) $familiaParam;
-                $prodSql = '(' . $prodSql . ') AND p.id_familia = :fid';
+            if (!empty($_GET['familia_id'])) {
+                $params[':fid'] = (int) $_GET['familia_id'];
+                $prodCond = "($prodCond) AND p.id_familia = :fid";
             }
 
             $sqlReal = "
@@ -309,7 +305,7 @@ try {
                  AND p.id_subindicador <=> fr.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fr.funcional
                 WHERE c.data BETWEEN :ini AND :fim
-                  AND ($prodSql)
+                  AND ($prodCond)
                   $estruturaWhere
             ";
             $real = q($pdo, $sqlReal, $params);
@@ -323,7 +319,7 @@ try {
                  AND p.id_subindicador <=> fm.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fm.funcional
                 WHERE c.data BETWEEN DATE_FORMAT(:fim,'%Y-%m-01') AND :fim
-                  AND ($prodSql)
+                  AND ($prodCond)
                   $estruturaWhere
             ";
             $meta = q($pdo, $sqlMeta, $params);
