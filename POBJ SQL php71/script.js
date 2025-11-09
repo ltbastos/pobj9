@@ -396,20 +396,6 @@ let RANKING_AGENCIAS = [];
 let RANKING_GERENTES = [];
 let GERENTES_GESTAO = [];
 let SEGMENTOS_DATA = [];
-const SEGMENT_SCENARIO_DEFAULT = "varejo";
-const SEGMENT_SCENARIO_PRESETS = [
-  { id: "D.R. VAREJO DIGITAL",          nome: "D.R. VAREJO DIGITAL",          slug: "dr_varejo_digital",          scenario: "varejo",   order: 10 },
-  { id: "SUPER. PJ NEGÓCIOS DIG.",      nome: "SUPER. PJ NEGÓCIOS DIG.",      slug: "super_pj_negocios_dig",      scenario: "varejo",   order: 20 },
-  { id: "SUPER. PF CLASSIC DIG.",       nome: "SUPER. PF CLASSIC DIG.",       slug: "super_pf_classic_dig",       scenario: "varejo",   order: 30 },
-  { id: "D.R. EMPRESAS",                nome: "D.R. EMPRESAS",                slug: "dr_empresas",                scenario: "empresas", order: 40 },
-  { id: "SUPER. VAREJO PRIME EMPRESAS", nome: "SUPER. VAREJO PRIME EMPRESAS", slug: "super_varejo_prime_empresas", scenario: "empresas", order: 50 },
-  { id: "VAREJO + PF DIGITAL",          nome: "VAREJO + PF DIGITAL",          slug: "varejo_pf_digital",          scenario: "varejo",   order: 60 },
-  { id: "Varejo",                       nome: "Varejo",                       slug: "varejo",                     scenario: "varejo",   order: 70, hidden: true },
-  { id: "Empresas",                     nome: "Empresas",                     slug: "empresas",                   scenario: "empresas", order: 80, hidden: true },
-];
-let SEGMENT_SCENARIO_INDEX = new Map();
-const SEGMENT_DIMENSION_MAP = new Map();
-let CURRENT_SEGMENT_SCENARIO = SEGMENT_SCENARIO_DEFAULT;
 
 // Aqui eu tenho mapas auxiliares para ligar produto, família e seção.
 let PRODUTOS_BY_FAMILIA = new Map();
@@ -531,10 +517,10 @@ const CARD_ALIAS_INDEX = new Map(); // cardId -> Set(alias)
 const CARD_SLUG_TO_ID = new Map();  // slug -> cardId
 const CARD_ID_SET = new Set();      // conjunto rápido dos ids oficiais
 const SUBPRODUTO_TO_INDICADOR = new Map(); // slug do subproduto -> cardId
-const GLOBAL_INDICATOR_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, indicadorNome, familiaId, familiaNome, scenario, key }]
-const GLOBAL_INDICATOR_META = new Map(); // `${scenario}::${indicadorId}` -> meta
-const GLOBAL_SUB_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, subId, subNome, familiaId, familiaNome, scenario, indicadorKey }]
-const GLOBAL_SUB_BY_INDICATOR = new Map(); // `${scenario}::${indicadorId}` -> Map(subId -> meta)
+const GLOBAL_INDICATOR_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, indicadorNome, familiaId, familiaNome, key }]
+const GLOBAL_INDICATOR_META = new Map(); // indicadorId -> meta
+const GLOBAL_SUB_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, subId, subNome, familiaId, familiaNome, indicadorKey }]
+const GLOBAL_SUB_BY_INDICATOR = new Map(); // indicadorId -> Map(subId -> meta)
 
 function registrarAliasIndicador(cardId, alias){
   const seguroId = limparTexto(cardId);
@@ -640,19 +626,12 @@ function matchesSegmentFilter(filterValue, ...candidates){
   const esperado = limparTexto(filterValue);
   if (!esperado) return false;
   if (matchesSelection(filterValue, ...candidates)) return true;
-  const esperadoScenario = getSegmentScenarioFromValue(esperado);
-  if (!esperadoScenario) return false;
   const lista = [];
   candidates.forEach(item => {
     if (Array.isArray(item)) lista.push(...item);
     else lista.push(item);
   });
-  return lista.some(candidate => {
-    const valor = limparTexto(candidate);
-    if (!valor) return false;
-    const scenario = getSegmentScenarioFromValue(valor);
-    return scenario === esperadoScenario;
-  });
+  return lista.some(candidate => limparTexto(candidate) === esperado);
 }
 
 function resetSubIndicatorOptionCache(){
@@ -2120,7 +2099,23 @@ function montarHierarquiaMesu(rows){
       segmentoLabel: base.segmentoLabel || label,
     };
   }).filter(Boolean);
-  SEGMENTOS_DATA = mergeSegmentPresets(normalizedSegments, (a, b) => String(a?.nome || "").localeCompare(String(b?.nome || ""), 'pt-BR', { sensitivity: 'base' }));
+  const segmentoMap = new Map();
+  normalizedSegments.forEach(seg => {
+    const key = limparTexto(seg?.id);
+    if (!key) return;
+    if (!segmentoMap.has(key)) {
+      segmentoMap.set(key, { ...seg });
+      return;
+    }
+    const current = segmentoMap.get(key);
+    if (seg.nome && !current.nome) current.nome = seg.nome;
+    if (seg.label && !current.label) current.label = seg.label;
+    if (Array.isArray(seg.aliases) && seg.aliases.length) {
+      const aliasSet = new Set([...(current.aliases || []), ...seg.aliases]);
+      current.aliases = Array.from(aliasSet).filter(Boolean);
+    }
+  });
+  SEGMENTOS_DATA = Array.from(segmentoMap.values()).sort((a, b) => String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt-BR', { sensitivity: 'base' }));
 
   const diretoriaOptions = DIMENSION_FILTER_OPTIONS.diretoria.length
     ? DIMENSION_FILTER_OPTIONS.diretoria
@@ -2335,8 +2330,6 @@ function montarHierarquiaMesu(rows){
   SEGMENTO_LABEL_INDEX = new Map();
   SEGMENTOS_DATA.forEach(seg => registerLabelIndexEntry(SEGMENTO_LABEL_INDEX, seg, seg.id, seg.nome, seg.label));
 
-  rebuildSegmentScenarioIndex();
-
   if (!CURRENT_USER_CONTEXT.diretoria && rows.length){
     const first = rows[0];
     CURRENT_USER_CONTEXT = {
@@ -2349,237 +2342,6 @@ function montarHierarquiaMesu(rows){
   }
 }
 
-function getPresetScenarioBySlug(slug){
-  const normalized = simplificarTexto(slug);
-  if (!normalized) return undefined;
-  const preset = SEGMENT_SCENARIO_PRESETS.find(item => {
-    const candidates = [item.slug, item.id, item.nome].map(val => simplificarTexto(val));
-    return candidates.some(value => value && value === normalized);
-  });
-  return preset?.scenario;
-}
-
-function mergeSegmentPresets(list = [], compareFn){
-  const manual = [];
-  const slugToManual = new Map();
-
-  const registerManualSlug = (slug, entry) => {
-    const normalized = simplificarTexto(slug);
-    if (!normalized) return;
-    slugToManual.set(normalized, entry);
-  };
-
-  const manualUsed = new Set();
-
-  SEGMENT_SCENARIO_PRESETS.forEach((preset, idx) => {
-    const slug = simplificarTexto(preset.slug || preset.nome || preset.id);
-    const value = limparTexto(preset.id) || limparTexto(preset.value) || slug || preset.nome || preset.slug || '';
-    const label = limparTexto(preset.nome) || limparTexto(preset.label) || value;
-    const scenario = preset.scenario || SEGMENT_SCENARIO_DEFAULT;
-    const order = Number.isFinite(preset.order) ? Number(preset.order) : idx;
-    const entry = {
-      id: value || slug || '',
-      nome: label || value || '',
-      label: label || value || '',
-      scenario,
-      slug,
-      order,
-      hidden: Boolean(preset.hidden),
-      source: "preset",
-      aliases: []
-    };
-    if (Array.isArray(preset.aliases)) {
-      preset.aliases.forEach(alias => {
-        const clean = limparTexto(alias);
-        if (clean && !entry.aliases.includes(clean)) entry.aliases.push(clean);
-      });
-    }
-    manual.push(entry);
-    registerManualSlug(slug, entry);
-    registerManualSlug(value, entry);
-    registerManualSlug(label, entry);
-  });
-
-  const extras = [];
-  const seen = new Set(slugToManual.keys());
-
-  list.forEach(seg => {
-    if (!seg) return;
-    const value = limparTexto(seg.id) || limparTexto(seg.value) || limparTexto(seg.nome) || '';
-    const label = limparTexto(seg.nome) || limparTexto(seg.label) || value;
-    const slug = simplificarTexto(seg.slug || seg.nome || seg.id || seg.value);
-    const scenario = seg.scenario
-      || getPresetScenarioBySlug(slug)
-      || getPresetScenarioBySlug(value)
-      || SEGMENT_SCENARIO_DEFAULT;
-
-    const candidateSlugs = [slug, simplificarTexto(value), simplificarTexto(label)].filter(Boolean);
-    const labelName = extractNameFromLabel(label);
-    if (labelName) {
-      const simplifiedLabelName = simplificarTexto(labelName);
-      if (simplifiedLabelName && !candidateSlugs.includes(simplifiedLabelName)) {
-        candidateSlugs.push(simplifiedLabelName);
-      }
-    }
-    const matchSlug = candidateSlugs.find(key => slugToManual.has(key));
-    if (matchSlug) {
-      const manualEntry = slugToManual.get(matchSlug);
-      if (manualEntry) {
-        manualUsed.add(manualEntry);
-        if (seg.id) manualEntry.id = limparTexto(seg.id) || manualEntry.id;
-        if (seg.nome) manualEntry.nome = limparTexto(seg.nome) || manualEntry.nome;
-        if (seg.label) manualEntry.label = limparTexto(seg.label) || manualEntry.label || manualEntry.nome;
-        if (seg.slug) manualEntry.slug = seg.slug;
-        if (seg.scenario) manualEntry.scenario = seg.scenario;
-        if (!manualEntry.id && value) manualEntry.id = value;
-        if (!manualEntry.nome && label) manualEntry.nome = label;
-        if (!manualEntry.label && label) manualEntry.label = label;
-        if (Array.isArray(manualEntry.aliases)) {
-          candidateSlugs.forEach(key => {
-            if (!key) return;
-            const alias = limparTexto(key);
-            if (alias && !manualEntry.aliases.includes(alias)) manualEntry.aliases.push(alias);
-          });
-        }
-        if (Array.isArray(seg.aliases)) {
-          seg.aliases.forEach(alias => {
-            const clean = limparTexto(alias);
-            if (clean && !manualEntry.aliases.includes(clean)) manualEntry.aliases.push(clean);
-          });
-        }
-        if (Number.isFinite(seg.order)) manualEntry.order = Number(seg.order);
-        if (seg.hidden != null) manualEntry.hidden = Boolean(seg.hidden);
-        else manualEntry.hidden = false;
-        candidateSlugs.forEach(key => registerManualSlug(key, manualEntry));
-      }
-      return;
-    }
-
-    if (candidateSlugs.some(key => seen.has(key))) return;
-
-    const entry = {
-      id: value || slug || '',
-      nome: label || value || '',
-      label: label || value || '',
-      scenario,
-      slug,
-      source: "data",
-      aliases: []
-    };
-    if (Number.isFinite(seg.order)) entry.order = Number(seg.order);
-    if (seg.hidden != null) entry.hidden = Boolean(seg.hidden);
-    extras.push(entry);
-    candidateSlugs.forEach(key => seen.add(key));
-  });
-
-  const comparator = typeof compareFn === 'function'
-    ? compareFn
-    : (a, b) => String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt-BR', { sensitivity: 'base' });
-  extras.sort(comparator);
-
-  const filteredManual = manual.filter(entry => manualUsed.has(entry));
-  const combined = filteredManual.concat(extras);
-  if (!combined.length) return manual.slice().sort(comparator);
-  combined.sort(comparator);
-  return combined;
-}
-
-function rebuildSegmentScenarioIndex(){
-  const register = (value, scenario) => {
-    const slug = simplificarTexto(value);
-    if (!slug) return;
-    if (!SEGMENT_SCENARIO_INDEX.has(slug)) SEGMENT_SCENARIO_INDEX.set(slug, scenario);
-  };
-
-  SEGMENT_SCENARIO_INDEX = new Map();
-
-  SEGMENT_SCENARIO_PRESETS.forEach(preset => {
-    const scenario = preset.scenario || SEGMENT_SCENARIO_DEFAULT;
-    register(preset.id, scenario);
-    register(preset.nome, scenario);
-    register(preset.slug, scenario);
-  });
-
-  SEGMENTOS_DATA.forEach(seg => {
-    if (!seg) return;
-    const scenario = seg.scenario
-      || getPresetScenarioBySlug(seg.slug)
-      || getPresetScenarioBySlug(seg.id)
-      || getPresetScenarioBySlug(seg.nome)
-      || SEGMENT_SCENARIO_DEFAULT;
-    register(seg.id, scenario);
-    register(seg.nome, scenario);
-    register(seg.slug, scenario);
-  });
-
-  register('', SEGMENT_SCENARIO_DEFAULT);
-  register('todos', SEGMENT_SCENARIO_DEFAULT);
-}
-
-function normalizeScenarioKey(value){
-  const slug = simplificarTexto(value);
-  return slug || SEGMENT_SCENARIO_DEFAULT;
-}
-
-function getSegmentScenarioFromValue(value){
-  const slug = simplificarTexto(value);
-  if (!slug || slug === 'todos') return SEGMENT_SCENARIO_DEFAULT;
-  return SEGMENT_SCENARIO_INDEX.get(slug) || SEGMENT_SCENARIO_DEFAULT;
-}
-
-function applySegmentDimension(nextScenario){
-  const key = normalizeScenarioKey(nextScenario);
-  let rows = SEGMENT_DIMENSION_MAP.get(key);
-
-  if (!Array.isArray(rows) || !rows.length) {
-    const pick = (map) => {
-      if (!(map instanceof Map)) return null;
-      return map.get(key)
-        || map.get(SEGMENT_SCENARIO_DEFAULT)
-        || map.get("default")
-        || map.get("todos")
-        || null;
-    };
-
-    const candidates = [];
-    if (typeof window !== "undefined") {
-      candidates.push(window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap);
-    } else {
-      candidates.push(segMap, dirMap, regMap, ageMap, agMap);
-    }
-
-    for (const candidate of candidates) {
-      const fallback = pick(candidate);
-      if (Array.isArray(fallback) && fallback.length) {
-        rows = fallback;
-        break;
-      }
-    }
-  }
-
-  if (!Array.isArray(rows) || !rows.length) {
-    rows = SEGMENT_DIMENSION_MAP.get(SEGMENT_SCENARIO_DEFAULT) || [];
-  }
-
-  DIM_PRODUTOS = rows.map(row => ({ ...row }));
-  rebuildCardCatalogFromDimension(DIM_PRODUTOS);
-  montarCatalogoDeProdutos(DIM_PRODUTOS);
-  CURRENT_SEGMENT_SCENARIO = key;
-  if (typeof state !== 'undefined' && state && typeof state === 'object') {
-    if (!state._raw) state._raw = {};
-    state._raw.dimProdutos = DIM_PRODUTOS;
-  }
-}
-
-function ensureSegmentScenarioFromFilters(){
-  const select = $('#f-segmento');
-  if (!select) return;
-  const desired = select.value || '';
-  const scenario = getSegmentScenarioFromValue(desired);
-  if (scenario === CURRENT_SEGMENT_SCENARIO) return;
-  applySegmentDimension(scenario);
-  initCombos();
-}
 function montarCatalogoDeProdutos(dimRows){
   const rows = Array.isArray(dimRows) ? dimRows : [];
   const famMap = new Map();
@@ -2836,8 +2598,7 @@ function normalizarLinhasFatoRealizados(rows){
     const quantidade = toNumber(lerCelula(raw, ["Quantidade", "Qtd"]));
     const variavelReal = toNumber(lerCelula(raw, ["Variavel Real", "Variável Real"]));
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -2847,7 +2608,7 @@ function normalizarLinhasFatoRealizados(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = subproduto;
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -2893,7 +2654,6 @@ function normalizarLinhasFatoRealizados(rows){
       qtd: quantidade,
       variavelReal,
     };
-    if (scenarioHint) base.segmentoScenario = scenarioHint;
     if (familiaCodigo) base.familiaCodigo = familiaCodigo;
     if (indicadorCodigo) base.indicadorCodigo = indicadorCodigo;
     if (subCodigo) base.subindicadorCodigo = subCodigo;
@@ -3026,8 +2786,7 @@ function normalizarLinhasFatoMetas(rows){
       competencia = `${data.slice(0, 7)}-01`;
     }
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -3037,7 +2796,7 @@ function normalizarLinhasFatoMetas(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = subproduto;
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -3083,7 +2842,6 @@ function normalizarLinhasFatoMetas(rows){
       variavelMeta,
       peso,
     };
-    if (scenarioHint) base.segmentoScenario = scenarioHint;
     if (familiaCodigo) base.familiaCodigo = familiaCodigo;
     if (indicadorCodigo) base.indicadorCodigo = indicadorCodigo;
     if (subCodigo) base.subindicadorCodigo = subCodigo;
@@ -3163,7 +2921,7 @@ function normalizarLinhasFatoVariavel(rows){
     if (!competencia && data) {
       competencia = `${data.slice(0, 7)}-01`;
     }
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], "");
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -3173,7 +2931,7 @@ function normalizarLinhasFatoVariavel(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = "";
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo], indicadorRes, "");
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -3701,95 +3459,91 @@ function registerGlobalSubAliasEntry(meta, alias){
 
 function rebuildGlobalDimensionAliasIndex(){
   resetGlobalDimensionAliasIndex();
-  SEGMENT_DIMENSION_MAP.forEach((rows, scenarioKey) => {
-    const scenario = normalizeScenarioKey(scenarioKey);
-    const list = Array.isArray(rows) ? rows : [];
-    list.forEach(row => {
-      if (!row) return;
-      const indicadorId = limparTexto(row.indicadorId);
-      if (!indicadorId) return;
-      const indicadorNome = limparTexto(row.indicadorNome) || indicadorId;
-      const familiaId = limparTexto(row.familiaId) || limparTexto(row.familiaSlug) || limparTexto(row.familiaCodigo) || "";
-      const familiaNome = limparTexto(row.familiaNome) || limparTexto(row.familia) || familiaId;
-      const indicatorKey = `${scenario}::${indicadorId}`;
-      let indicatorMeta = GLOBAL_INDICATOR_META.get(indicatorKey);
-      if (!indicatorMeta) {
-        indicatorMeta = {
-          indicadorId,
-          indicadorNome,
-          familiaId,
-          familiaNome,
-          scenario,
-          key: indicatorKey,
-          aliases: new Set(),
-        };
-        GLOBAL_INDICATOR_META.set(indicatorKey, indicatorMeta);
-      } else {
-        if (indicadorNome) indicatorMeta.indicadorNome = indicadorNome;
-        if (familiaId) indicatorMeta.familiaId = familiaId;
-        if (familiaNome) indicatorMeta.familiaNome = familiaNome;
-      }
-
-      const aliasCandidates = [
+  const list = Array.isArray(DIM_PRODUTOS) ? DIM_PRODUTOS : [];
+  list.forEach(row => {
+    if (!row) return;
+    const indicadorId = limparTexto(row.indicadorId);
+    if (!indicadorId) return;
+    const indicadorNome = limparTexto(row.indicadorNome) || indicadorId;
+    const familiaId = limparTexto(row.familiaId) || limparTexto(row.familiaSlug) || limparTexto(row.familiaCodigo) || "";
+    const familiaNome = limparTexto(row.familiaNome) || limparTexto(row.familia) || familiaId;
+    const indicatorKey = indicadorId;
+    let indicatorMeta = GLOBAL_INDICATOR_META.get(indicatorKey);
+    if (!indicatorMeta) {
+      indicatorMeta = {
         indicadorId,
         indicadorNome,
-        limparTexto(row.indicadorCodigo),
-        ...(Array.isArray(row.indicadorAliases) ? row.indicadorAliases : [])
-      ];
-      aliasCandidates.forEach(alias => {
-        const texto = limparTexto(alias);
-        if (!texto) return;
-        indicatorMeta.aliases.add(texto);
-        registerGlobalIndicatorAliasEntry(indicatorMeta, texto);
-      });
+        familiaId,
+        familiaNome,
+        key: indicatorKey,
+        aliases: new Set(),
+      };
+      GLOBAL_INDICATOR_META.set(indicatorKey, indicatorMeta);
+    } else {
+      if (indicadorNome) indicatorMeta.indicadorNome = indicadorNome;
+      if (familiaId) indicatorMeta.familiaId = familiaId;
+      if (familiaNome) indicatorMeta.familiaNome = familiaNome;
+    }
 
-      let subMap = GLOBAL_SUB_BY_INDICATOR.get(indicatorKey);
-      if (!subMap) {
-        subMap = new Map();
-        GLOBAL_SUB_BY_INDICATOR.set(indicatorKey, subMap);
-      }
+    const aliasCandidates = [
+      indicadorId,
+      indicadorNome,
+      limparTexto(row.indicadorCodigo),
+      ...(Array.isArray(row.indicadorAliases) ? row.indicadorAliases : [])
+    ];
+    aliasCandidates.forEach(alias => {
+      const texto = limparTexto(alias);
+      if (!texto) return;
+      indicatorMeta.aliases.add(texto);
+      registerGlobalIndicatorAliasEntry(indicatorMeta, texto);
+    });
 
-      const subId = limparTexto(row.subId);
-      if (subId) {
-        const subNome = limparTexto(row.subNome) || subId;
-        const subKey = `${indicatorKey}::${subId}`;
-        let subMeta = subMap.get(subId);
-        if (!subMeta) {
-          subMeta = {
-            indicadorId,
-            indicadorKey: indicatorKey,
-            subId,
-            subNome,
-            familiaId,
-            familiaNome,
-            scenario,
-            key: subKey,
-            aliases: new Set(),
-          };
-          subMap.set(subId, subMeta);
-        } else {
-          if (subNome) subMeta.subNome = subNome;
-        }
+    let subMap = GLOBAL_SUB_BY_INDICATOR.get(indicatorKey);
+    if (!subMap) {
+      subMap = new Map();
+      GLOBAL_SUB_BY_INDICATOR.set(indicatorKey, subMap);
+    }
 
-        const subAliasCandidates = [
+    const subId = limparTexto(row.subId);
+    if (subId) {
+      const subNome = limparTexto(row.subNome) || subId;
+      const subKey = `${indicatorKey}::${subId}`;
+      let subMeta = subMap.get(subId);
+      if (!subMeta) {
+        subMeta = {
+          indicadorId,
+          indicadorKey: indicatorKey,
           subId,
           subNome,
-          limparTexto(row.subCodigo),
-          ...(Array.isArray(row.subAliases) ? row.subAliases : [])
-        ];
-        subAliasCandidates.forEach(alias => {
-          const texto = limparTexto(alias);
-          if (!texto) return;
-          subMeta.aliases.add(texto);
-          registerGlobalSubAliasEntry(subMeta, texto);
-        });
+          familiaId,
+          familiaNome,
+          key: subKey,
+          aliases: new Set(),
+        };
+        subMap.set(subId, subMeta);
+      } else {
+        if (subNome) subMeta.subNome = subNome;
+        if (familiaId) subMeta.familiaId = familiaId;
+        if (familiaNome) subMeta.familiaNome = familiaNome;
       }
-    });
+
+      const subAliasCandidates = [
+        subId,
+        subNome,
+        limparTexto(row.subCodigo),
+        ...(Array.isArray(row.subAliases) ? row.subAliases : [])
+      ];
+      subAliasCandidates.forEach(alias => {
+        const texto = limparTexto(alias);
+        if (!texto) return;
+        subMeta.aliases.add(texto);
+        registerGlobalSubAliasEntry(subMeta, texto);
+      });
+    }
   });
 }
 
-function resolveIndicatorFromDimension(candidates, scenarioHint = "") {
-  const scenario = scenarioHint ? normalizeScenarioKey(scenarioHint) : "";
+function resolveIndicatorFromDimension(candidates) {
   const values = Array.isArray(candidates) ? candidates : [candidates];
   const aliases = [];
   values.forEach(value => {
@@ -3804,18 +3558,13 @@ function resolveIndicatorFromDimension(candidates, scenarioHint = "") {
     if (!key) continue;
     const entries = GLOBAL_INDICATOR_ALIAS_INDEX.get(key);
     if (!entries || !entries.length) continue;
-    if (scenario) {
-      const matchScenario = entries.find(entry => entry.scenario === scenario);
-      if (matchScenario) return matchScenario;
-    }
     return entries[0];
   }
   return null;
 }
 
-function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null, scenarioHint = "") {
-  const scenario = indicatorMeta?.scenario || (scenarioHint ? normalizeScenarioKey(scenarioHint) : "");
-  const indicatorKey = indicatorMeta?.key || (indicatorMeta && scenario ? `${scenario}::${indicatorMeta.indicadorId}` : "");
+function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null) {
+  const indicatorKey = indicatorMeta?.key || "";
   const values = Array.isArray(candidates) ? candidates : [candidates];
   const aliases = [];
   values.forEach(value => {
@@ -3847,10 +3596,6 @@ function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null, scen
     if (indicatorKey) {
       const indicatorMatch = entries.find(entry => entry.indicadorKey === indicatorKey);
       if (indicatorMatch) return indicatorMatch;
-    }
-    if (scenario) {
-      const scenarioMatch = entries.find(entry => entry.scenario === scenario);
-      if (scenarioMatch) return scenarioMatch;
     }
     return entries[0];
   }
@@ -3940,8 +3685,7 @@ function normalizarLinhasFatoDetalhes(rows){
     const pontos = toNumber(lerCelula(raw, ["Pontos", "pontos", "pontos_cumpridos", "Pontos Cumpridos"]));
     const statusId = limparTexto(lerCelula(raw, ["Status ID", "status_id", "Status"]));
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([indicadorId, indicadorNome], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([indicadorId, indicadorNome]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) indicadorId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) indicadorNome = indicadorRes.indicadorNome;
@@ -3949,7 +3693,7 @@ function normalizarLinhasFatoDetalhes(rows){
       if (indicadorRes.familiaNome) familiaNome = indicadorRes.familiaNome;
     }
 
-    const subRes = resolveSubIndicatorFromDimension([subId, subNome], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subId, subNome], indicadorRes);
     if (subRes) {
       if (subRes.subId) subId = subRes.subId;
       if (subRes.subNome) subNome = subRes.subNome;
@@ -4321,39 +4065,15 @@ function processBaseDataSources({
 
   const produtosDimRows = Array.isArray(produtosDimRaw) ? produtosDimRaw : [];
   const baseDimProdutos = normalizarDimProdutos(produtosDimRows);
-  const dimProdutosVarejo = baseDimProdutos.map(row => ({ ...row, scenario: SEGMENT_SCENARIO_DEFAULT }));
-
-  const dimProdutosEmpresas = dimProdutosVarejo.map(row => ({ ...row, scenario: "empresas" }));
-
-  SEGMENT_DIMENSION_MAP.clear();
-  SEGMENT_DIMENSION_MAP.set(SEGMENT_SCENARIO_DEFAULT, dimProdutosVarejo);
-  SEGMENT_DIMENSION_MAP.set("empresas", dimProdutosEmpresas);
-  const defaultDim = dimProdutosVarejo.slice();
-  const empresasDim = dimProdutosEmpresas.slice();
-
-  const dimensionAliases = [
-    { key: SEGMENT_SCENARIO_DEFAULT, value: defaultDim },
-    { key: "default", value: defaultDim },
-    { key: "todos", value: defaultDim },
-    { key: "empresas", value: empresasDim }
-  ];
-
-  const globalMaps = [];
+  DIM_PRODUTOS = baseDimProdutos.map(row => ({ ...row }));
+  rebuildCardCatalogFromDimension(DIM_PRODUTOS);
+  montarCatalogoDeProdutos(DIM_PRODUTOS);
   if (typeof window !== "undefined") {
-    globalMaps.push(window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap);
-  } else {
-    globalMaps.push(segMap, dirMap, regMap, ageMap, agMap);
+    [window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap]
+      .filter(map => map instanceof Map)
+      .forEach(map => map.clear());
   }
-
-  globalMaps.forEach(map => {
-    if (!(map instanceof Map)) return;
-    map.clear();
-    dimensionAliases.forEach(({ key, value }) => {
-      map.set(key, value);
-    });
-  });
   rebuildGlobalDimensionAliasIndex();
-  applySegmentDimension(CURRENT_SEGMENT_SCENARIO);
   montarHierarquiaMesu(mesuRows);
 
   FACT_REALIZADOS = normalizarLinhasFatoRealizados(Array.isArray(realizadosRaw) ? realizadosRaw : []);
@@ -4415,7 +4135,7 @@ function processBaseDataSources({
     dimGerentesGestao: gerentesGestaoDim,
     dimGerentes: gerentesDim,
     dimProdutos: DIM_PRODUTOS,
-    dimProdutosPorSegmento: Object.fromEntries(Array.from(SEGMENT_DIMENSION_MAP.entries()).map(([key, rows]) => [key, rows])),
+    dimProdutosPorSegmento: { default: DIM_PRODUTOS },
     status: STATUS_INDICADORES_DATA,
     dados: FACT_REALIZADOS,
     realizados: FACT_REALIZADOS,
@@ -5509,12 +5229,6 @@ const CAMPAIGN_SPRINTS = [
             { id: "minimo", label: "90% em todos", values: { linhas: 90, cash: 90, conquista: 90 } },
             { id: "meta", label: "Meta (100%)", values: { linhas: 100, cash: 100, conquista: 100 } },
             { id: "destaque", label: "Stretch (120%)", values: { linhas: 120, cash: 120, conquista: 120 } }
-          ],
-          scenarios: [
-            { id: "full", label: "100% em todas as linhas", values: { linhas: 100, cash: 100, conquista: 100 }, note: "Parabéns" },
-            { id: "linhas120", label: "Linhas 120%, Cash 100%, Conquista 90%", values: { linhas: 120, cash: 100, conquista: 90 }, note: "Elegível" },
-            { id: "cash115", label: "Linhas 95%, Cash 115%, Conquista 130%", values: { linhas: 95, cash: 115, conquista: 130 }, note: "Elegível" },
-            { id: "ajuste", label: "Linhas 85%, Cash 80%, Conquista 110%", values: { linhas: 85, cash: 80, conquista: 110 }, note: "Ajustar" }
           ]
         },
         {
@@ -5535,12 +5249,6 @@ const CAMPAIGN_SPRINTS = [
             { id: "minimo", label: "90% em todos", values: { linhas: 90, cash: 90, conquista: 90 } },
             { id: "meta", label: "Meta (100%)", values: { linhas: 100, cash: 100, conquista: 100 } },
             { id: "stretch", label: "Stretch (120%)", values: { linhas: 120, cash: 120, conquista: 120 } }
-          ],
-          scenarios: [
-            { id: "volume", label: "Linhas 130%, Cash 115%, Conquista 95%", values: { linhas: 130, cash: 115, conquista: 95 }, note: "Parabéns" },
-            { id: "equilibrio", label: "Linhas 110%, Cash 105%, Conquista 100%", values: { linhas: 110, cash: 105, conquista: 100 }, note: "Elegível" },
-            { id: "alerta", label: "Linhas 92%, Cash 88%, Conquista 96%", values: { linhas: 92, cash: 88, conquista: 96 }, note: "Ajustar" },
-            { id: "critico", label: "Linhas 80%, Cash 78%, Conquista 85%", values: { linhas: 80, cash: 78, conquista: 85 }, note: "Não elegível" }
           ]
         }
       ]
@@ -6442,17 +6150,19 @@ async function apiGet(path, params){
 
 function setOptions(selectEl, items, emptyLabel='Todos') {
   if (!selectEl) return;
-  const opts = (Array.isArray(items)?items:[]).map(it => {
-    const id = String(it.id ?? it.value ?? it.funcional ?? '').trim();
-    const label = String(it.label ?? it.nome ?? id).trim();
-    return { value: id, label };
-  }).filter(o => o.value && o.label);
+  const opts = (Array.isArray(items) ? items : [])
+    .map(it => {
+      const id = String(it.id ?? it.value ?? it.funcional ?? '').trim();
+      const label = String(it.label ?? it.nome ?? id).trim();
+      return id && label ? { value: id, label } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'));
 
   const prev = selectEl.value;
   selectEl.innerHTML = '';
   selectEl.appendChild(new Option(emptyLabel, ''));
   for (const o of opts) selectEl.appendChild(new Option(o.label, o.value));
-  // preserva opção se ainda existir
   if (opts.some(o => o.value === prev)) selectEl.value = prev;
 }
 
@@ -9055,7 +8765,6 @@ function buildHierarchyFallbackRow(fieldKey, item) {
   if (full.hidden != null) row.hidden = Boolean(full.hidden);
   if (Number.isFinite(full.order)) row.order = Number(full.order);
   if (full.slug) row.slug = full.slug;
-  if (full.scenario) row.scenario = full.scenario;
 
   return row;
 }
@@ -9123,7 +8832,6 @@ function getHierarchyRows(){
         segmentoHidden: segMeta.hidden,
         segmentoAliases: Array.isArray(segMeta.aliases) ? [...segMeta.aliases] : undefined,
         segmentoSlug: segMeta.slug,
-        segmentoScenario: segMeta.scenario,
         diretoriaId: dirMeta.id || dirMeta.nome || "",
         diretoriaNome: dirMeta.nome || dirMeta.id || dirMeta.segmento || "",
         regionalId: gerMeta.id || gerMeta.nome || "",
@@ -9251,7 +8959,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     }
     if (meta.hidden != null && entry.hidden == null) entry.hidden = Boolean(meta.hidden);
     if (meta.slug && !entry.slug) entry.slug = meta.slug;
-    if (meta.scenario && !entry.scenario) entry.scenario = meta.scenario;
     if (Number.isFinite(meta.order)) {
       const order = Number(meta.order);
       if (!Number.isFinite(entry.order) || order < entry.order) entry.order = order;
@@ -9292,7 +8999,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     }
     if (meta.hidden != null) entry.hidden = Boolean(meta.hidden);
     if (meta.slug) entry.slug = meta.slug;
-    if (meta.scenario) entry.scenario = meta.scenario;
     if (Number.isFinite(meta.order)) entry.order = Number(meta.order);
     else if (safeValue && orderById.has(safeValue)) entry.order = orderById.get(safeValue);
     labelIndex.set(key, entry);
@@ -9361,8 +9067,7 @@ function buildHierarchyOptions(fieldKey, selection, rows){
           order: row.segmentoOrder ?? row.order,
           hidden: row.segmentoHidden ?? row.hidden,
           aliases: row.segmentoAliases ?? row.aliases,
-          slug: row.segmentoSlug ?? row.slug,
-          scenario: row.segmentoScenario ?? row.scenario
+          slug: row.segmentoSlug ?? row.slug
         }
       : {};
     if (aliasCandidates.length) {
@@ -9377,7 +9082,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     if (row.hidden != null && meta.hidden == null) meta.hidden = Boolean(row.hidden);
     if (Number.isFinite(row.order) && !Number.isFinite(meta.order)) meta.order = Number(row.order);
     if (row.slug && !meta.slug) meta.slug = row.slug;
-    if (row.scenario && !meta.scenario) meta.scenario = row.scenario;
     register(cleanValue || rawValue, displayLabel || cleanLabel || cleanValue, meta);
   });
 
@@ -16516,7 +16220,6 @@ function ensureSyntheticDashboardRowsForTree(rows = [], sections = []) {
         syntheticSource: "dashboard",
         segmento: segmentoValor,
         segmentoId: segmentoValor,
-        segmentoScenario: CURRENT_SEGMENT_SCENARIO,
         diretoria: "",
         diretoriaNome: "",
         gerenciaRegional: "",
@@ -16860,7 +16563,6 @@ function renderTreeTable() {
   nodes.forEach(n=>renderNode(n,null,[]));
 }
 function applyFiltersAndRender(){
-  ensureSegmentScenarioFromFilters();
   updatePeriodLabels();
   updateDashboardCards();
   if(state.tableRendered) renderTreeTable();
