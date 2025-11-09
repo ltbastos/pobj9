@@ -6367,6 +6367,44 @@ function buildResumoParams() {
   return params.toString();
 }
 
+async function fetchResumoKpiFromApi() {
+  const period = state?.period || getDefaultPeriodRange();
+  const startISO = period?.start || todayISO();
+  const endISO = period?.end || startISO;
+  const query = new URLSearchParams({ endpoint: 'resumo', data_ini: startISO, data_fim: endISO });
+  const filters = buildResumoParams();
+  if (filters) {
+    const filterParams = new URLSearchParams(filters);
+    filterParams.forEach((value, key) => {
+      if (value !== '') query.set(key, value);
+    });
+  }
+  return apiGet(`${API_BASE}?${query.toString()}`);
+}
+
+function parseResumoKpiPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { meta: 0, realizado: 0, updatedAt: null };
+  }
+  const kpi = payload.kpi && typeof payload.kpi === 'object' ? payload.kpi : {};
+  const meta = toNumber(kpi.meta_total ?? kpi.meta ?? 0);
+  const realizado = toNumber(kpi.realizado_total ?? kpi.realizado ?? 0);
+  const updatedAt = typeof payload.updated_at === 'string' ? payload.updated_at : null;
+  return { meta, realizado, updatedAt };
+}
+
+async function refreshResumoFromApi() {
+  try {
+    const raw = await fetchResumoKpiFromApi();
+    state.apiResumo = parseResumoKpiPayload(raw);
+    return state.apiResumo;
+  } catch (error) {
+    console.warn('Falha ao carregar resumo da API.', error);
+    if (!state.apiResumo) state.apiResumo = null;
+    return state.apiResumo;
+  }
+}
+
 async function bootstrapFiltros() {
   try {
     const data = await apiGet(`${API_BASE}?endpoint=bootstrap`);
@@ -7170,6 +7208,7 @@ const state = {
   _rankingRaw:[],
   facts:{ dados:[], campanhas:[], variavel:[], historico:[] },
   dashboard:{ sections:[], summary:{} },
+  apiResumo:null,
   dashboardVisibleSections:[],
   activeView:"cards",
   resumoMode: readLocalStorageItem(RESUMO_MODE_STORAGE_KEY) === "legacy" ? "legacy" : "cards",
@@ -7714,6 +7753,7 @@ async function clearFilters() {
   }
 
   await withSpinner(async () => {
+    await refreshResumoFromApi();
     applyFiltersAndRender();
     renderAppliedFilters();
     renderCampanhasView();
@@ -8031,6 +8071,7 @@ function ensureStatusFilterInAdvanced() {
     host.appendChild(wrap);
     $("#f-status-kpi").addEventListener("change", async () => {
       await withSpinner(async () => {
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -8698,6 +8739,7 @@ function renderAppliedFilters() {
     chip.querySelector("button").addEventListener("click", async () => {
       await withSpinner(async () => {
         resetFn?.();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -10579,6 +10621,7 @@ function bindEvents() {
   $("#btn-consultar")?.addEventListener("click", async () => {
     await withSpinner(async () => {
       autoSnapViewToFilters();
+      await refreshResumoFromApi();
       applyFiltersAndRender();
       renderAppliedFilters();
       renderCampanhasView();
@@ -10613,6 +10656,7 @@ function bindEvents() {
     $(sel)?.addEventListener("change", async () => {
       await withSpinner(async () => {
         autoSnapViewToFilters();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -10630,6 +10674,7 @@ function bindEvents() {
       syncPeriodFromAccumulatedView(nextView);
       await withSpinner(async () => {
         autoSnapViewToFilters();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -11440,7 +11485,27 @@ function renderResumoKPI(summary, context = {}) {
       </div>`;
   };
 
-  kpi.innerHTML = [
+  const cards = [];
+  const resumoApi = state?.apiResumo;
+  if (resumoApi && (Number.isFinite(resumoApi.meta) || Number.isFinite(resumoApi.realizado))) {
+    const metaResumo = toNumber(resumoApi.meta);
+    const realizadoResumo = toNumber(resumoApi.realizado);
+    cards.push(buildCard(
+      "Metas do período",
+      "ti ti-target-arrow",
+      realizadoResumo,
+      metaResumo,
+      "brl",
+      realizadoResumo,
+      metaResumo,
+      {
+        labelText: "Metas do período",
+        labelHTML: 'Metas do <span class="kpi-label-emphasis">período</span>'
+      }
+    ));
+  }
+
+  cards.push(
     buildCard("Indicadores", "ti ti-list-check", indicadoresAtingidos, indicadoresTotal, "int", visibleItemsHitCount),
     buildCard("Pontos", "ti ti-medal", pontosAtingidos, pontosTotal, "pts", visiblePointsHit),
     buildCard(
@@ -11456,7 +11521,9 @@ function renderResumoKPI(summary, context = {}) {
         labelHTML: 'Variável <span class="kpi-label-emphasis">Estimada</span>'
       }
     )
-  ].join("");
+  );
+
+  kpi.innerHTML = cards.join("");
 
   triggerBarAnimation(kpi.querySelectorAll('.hitbar'), shouldAnimateResumo);
   if (resumoAnim) resumoAnim.kpiKey = nextResumoKey;
@@ -13548,7 +13615,7 @@ function renderFamilias(sections, summary){
     const badge = card.querySelector(".badge");
     if (badge && tip) bindBadgeTooltip(card);
 
-    card.addEventListener("click", (ev)=>{
+    card.addEventListener("click", async (ev)=>{
       if (ev.target?.classList.contains("badge")) return;
       const prodId = card.getAttribute("data-prod-id");
       const familiaSelect = $("#f-familia");
@@ -13570,6 +13637,7 @@ function renderFamilias(sections, summary){
       autoSnapViewToFilters();
       const tabDet = document.querySelector('.tab[data-view="table"]');
       if (tabDet && !tabDet.classList.contains("is-active")) tabDet.click(); else switchView("table");
+      await refreshResumoFromApi();
       applyFiltersAndRender();
       renderAppliedFilters();
     });
@@ -16851,6 +16919,7 @@ async function refresh(){
       updatePeriodLabels();
     }
 
+    await refreshResumoFromApi();
     updateDashboardCards();
     reorderFiltersUI();
     renderAppliedFilters();

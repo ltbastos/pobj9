@@ -15,6 +15,11 @@ try {
     ]);
 
     // --- [POBJ] helpers de filtros ---
+    function env(string $key, $default = null) {
+      $value = getenv($key);
+      return $value === false ? $default : $value;
+    }
+
     function envArray($key, $default = []) {
       $v = getenv($key);
       if (!$v) return $default;
@@ -24,10 +29,24 @@ try {
     function q(PDO $pdo, string $sql, array $p = []) {
       $st = $pdo->prepare($sql);
       foreach ($p as $k => $v) {
-        $st->bindValue(is_int($k) ? $k + 1 : $k, $v);
+        if (is_int($k)) {
+          $st->bindValue($k + 1, $v);
+        } else {
+          $st->bindValue($k, $v);
+        }
       }
       $st->execute();
       return $st->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    function ok($data) {
+      echo json_encode($data, JSON_UNESCAPED_UNICODE);
+      exit;
+    }
+
+    function err(string $message, int $status = 400) {
+      http_response_code($status);
+      ok(['error' => $message]);
     }
 
     function numOrNull(string $k): ?int {
@@ -73,22 +92,18 @@ try {
       return ['(' . $inSql . ' OR e.cargo LIKE :ger_like)', $params];
     }
 
+    $T_ESTR   = env('DB_TABLE_ESTRUTURA', 'd_estrutura');
+    $T_PROD   = env('DB_TABLE_PRODUTOS', 'd_produto');
+    $T_FR     = env('DB_TABLE_REALIZADOS', 'f_realizado');
+    $T_FM     = env('DB_TABLE_METAS', 'f_meta');
+    $T_CAL    = env('DB_TABLE_CALENDARIO', 'd_calendario');
+    $T_STATUS = env('DB_TABLE_STATUS_INDICADORES', 'd_status_indicadores');
+
     $endpoint = $_GET['endpoint'] ?? '';
-
-    $json = static function ($data) {
-        echo json_encode($data, JSON_UNESCAPED_UNICODE);
-        exit;
-    };
-
-    $jsonError = static function ($message, int $status = 400) {
-        http_response_code($status);
-        echo json_encode(['error' => $message], JSON_UNESCAPED_UNICODE);
-        exit;
-    };
 
     switch ($endpoint) {
         case 'health':
-            $json(['status' => 'ok']);
+            ok(['status' => 'ok']);
 
         case 'filtros':
             $nivel = $_GET['nivel'] ?? '';
@@ -97,33 +112,33 @@ try {
 
             if ($nivel === 'diretorias') {
                 $rows = q($pdo, "SELECT DISTINCT e.id_diretoria AS id, e.diretoria AS label
-                     FROM d_estrutura e $where
+                     FROM {$T_ESTR} e $where
                      AND e.id_diretoria IS NOT NULL AND e.diretoria IS NOT NULL
                      ORDER BY label", $params);
-                echo json_encode(['diretorias' => $rows]); exit;
+                ok(['diretorias' => $rows]);
             }
 
             if ($nivel === 'regionais') {
                 $rows = q($pdo, "SELECT DISTINCT e.id_regional AS id, e.regional AS label, e.id_diretoria
-                     FROM d_estrutura e $where
+                     FROM {$T_ESTR} e $where
                      AND e.id_regional IS NOT NULL AND e.regional IS NOT NULL
                      ORDER BY label", $params);
-                echo json_encode(['regionais' => $rows]); exit;
+                ok(['regionais' => $rows]);
             }
 
             if ($nivel === 'agencias') {
                 $rows = q($pdo, "SELECT DISTINCT e.id_agencia AS id, e.agencia AS label, e.id_regional
-                     FROM d_estrutura e $where
+                     FROM {$T_ESTR} e $where
                      AND e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
                      ORDER BY label", $params);
-                echo json_encode(['agencias' => $rows]); exit;
+                ok(['agencias' => $rows]);
             }
 
             if ($nivel === 'indicadores') {
                 $prodParams = [];
                 $where = "NULLIF(TRIM(p.indicador),'') IS NOT NULL";
                 if (!empty($_GET['familia_id'])) {
-                    $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM d_produto WHERE id_familia = :fid", [':fid' => (int) $_GET['familia_id']]);
+                    $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM {$T_PROD} WHERE id_familia = :fid", [':fid' => (int) $_GET['familia_id']]);
                     if (!empty($famKey[0]['fam_key'])) {
                         $where .= ' AND UPPER(TRIM(p.familia)) = :famk';
                         $prodParams[':famk'] = $famKey[0]['fam_key'];
@@ -131,56 +146,55 @@ try {
                 }
                 $rows = q($pdo, "
                     SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
-                    FROM d_produto p
+                    FROM {$T_PROD} p
                     WHERE $where
                     ORDER BY label
                 ", $prodParams);
-                echo json_encode(['indicadores' => $rows]); exit;
+                ok(['indicadores' => $rows]);
             }
 
             if ($nivel === 'subindicadores') {
                 $iid = (int) ($_GET['indicador_id'] ?? 0);
                 $rows = q($pdo, "
                     SELECT DISTINCT p.id_subindicador AS id, p.subindicador AS label
-                    FROM d_produto p
+                    FROM {$T_PROD} p
                     WHERE p.id_indicador = :iid
                       AND p.id_subindicador IS NOT NULL
                       AND NULLIF(TRIM(p.subindicador),'') IS NOT NULL
                     ORDER BY label
                 ", [':iid' => $iid]);
-                echo json_encode(['subindicadores' => $rows]); exit;
+                ok(['subindicadores' => $rows]);
             }
 
             if ($nivel === 'produto_info') {
                 $iid = (int) ($_GET['indicador_id'] ?? 0);
                 $info = q($pdo, "
                     SELECT MIN(id_familia) AS familia_id, MAX(familia) AS familia_label
-                    FROM d_produto
+                    FROM {$T_PROD}
                     WHERE id_indicador = :iid
                 ", [':iid' => $iid]);
                 $subs = q($pdo, "
                     SELECT DISTINCT id_subindicador AS id, subindicador AS label
-                    FROM d_produto
+                    FROM {$T_PROD}
                     WHERE id_indicador = :iid
                       AND id_subindicador IS NOT NULL
                       AND NULLIF(TRIM(subindicador),'') IS NOT NULL
                     ORDER BY label
                 ", [':iid' => $iid]);
-                echo json_encode([
+                ok([
                     'familia_id' => $info[0]['familia_id'] ?? null,
                     'familia' => $info[0]['familia_label'] ?? null,
                     'subindicadores' => $subs,
                 ]);
-                exit;
             }
 
             if ($nivel === 'ggestoes') {
                 // lista GG no escopo filtrado
                 list($isGGsql, $isGGparams) = sqlIsGG();
                 $rows = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
-                     FROM d_estrutura e $where AND $isGGsql
+                     FROM {$T_ESTR} e $where AND $isGGsql
                      ORDER BY label", array_merge($params, $isGGparams));
-                echo json_encode(['ggestoes' => $rows]); exit;
+                ok(['ggestoes' => $rows]);
             }
 
             if ($nivel === 'gerentes') {
@@ -188,7 +202,7 @@ try {
                 $extra = '';
                 $pp = $params;
                 if (!empty($_GET['gg_funcional'])) {
-                    $agenciasDoGG = q($pdo, "SELECT DISTINCT id_agencia FROM d_estrutura WHERE funcional = :gg", [':gg'=>$_GET['gg_funcional']]);
+                    $agenciasDoGG = q($pdo, "SELECT DISTINCT id_agencia FROM {$T_ESTR} WHERE funcional = :gg", [':gg'=>$_GET['gg_funcional']]);
                     if ($agenciasDoGG) {
                         $ph = [];
                         foreach ($agenciasDoGG as $idx => $a) {
@@ -203,16 +217,22 @@ try {
                 }
                 list($isGersql, $isGerparams) = sqlIsGerente();
                 $rows = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
-                     FROM d_estrutura e $where $extra AND $isGersql
+                     FROM {$T_ESTR} e $where $extra AND $isGersql
                      ORDER BY label", array_merge($pp, $isGerparams));
-                echo json_encode(['gerentes' => $rows]); exit;
+                ok(['gerentes' => $rows]);
             }
 
-            http_response_code(400);
-            echo json_encode(['error'=>'nivel inválido']); exit;
+            err('nivel inválido');
 
         case 'status_indicadores':
-            $rows = q($pdo, 'SELECT id, status FROM d_status_indicadores ORDER BY id');
+            $rows = [];
+            try {
+                if ($T_STATUS) {
+                    $rows = q($pdo, "SELECT id, status FROM {$T_STATUS} ORDER BY id");
+                }
+            } catch (Throwable $ignored) {
+                $rows = [];
+            }
             if (!$rows) {
                 $rows = [
                     ['id' => '01', 'status' => 'Atingido'],
@@ -220,35 +240,35 @@ try {
                     ['id' => '03', 'status' => 'Todos'],
                 ];
             }
-            $json(['rows' => $rows]);
+            ok(['rows' => $rows]);
 
         case 'bootstrap': {
             $params = [];
             $where = buildWhereEstrutura($_GET, $params);
 
             $segmentos = q($pdo, "SELECT DISTINCT e.id_segmento AS id, e.segmento AS label
-                        FROM d_estrutura e
+                        FROM {$T_ESTR} e
                         WHERE e.id_segmento IS NOT NULL AND e.segmento IS NOT NULL
                         ORDER BY label");
 
             $diretorias = q($pdo, "SELECT DISTINCT e.id_diretoria AS id, e.diretoria AS label
-                         FROM d_estrutura e
+                         FROM {$T_ESTR} e
                          WHERE e.id_diretoria IS NOT NULL AND e.diretoria IS NOT NULL
                          ORDER BY label");
 
             $regionais = q($pdo, "SELECT DISTINCT e.id_regional AS id, e.regional AS label, e.id_diretoria
-                        FROM d_estrutura e
+                        FROM {$T_ESTR} e
                         WHERE e.id_regional IS NOT NULL AND e.regional IS NOT NULL
                         ORDER BY label");
 
             $agencias = q($pdo, "SELECT DISTINCT e.id_agencia AS id, e.agencia AS label, e.id_regional
-                       FROM d_estrutura e
+                       FROM {$T_ESTR} e
                        WHERE e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
                        ORDER BY label");
 
             $familias = q($pdo, "
                 SELECT MIN(p.id_familia) AS id, MAX(p.familia) AS label
-                FROM d_produto p
+                FROM {$T_PROD} p
                 WHERE NULLIF(TRIM(p.familia),'') IS NOT NULL
                 GROUP BY UPPER(TRIM(p.familia))
                 ORDER BY label
@@ -256,7 +276,7 @@ try {
 
             $indicadores = q($pdo, "
                 SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
-                FROM d_produto p
+                FROM {$T_PROD} p
                 WHERE NULLIF(TRIM(p.indicador),'') IS NOT NULL
                 ORDER BY label
             ");
@@ -264,14 +284,14 @@ try {
             // GG
             list($isGGsql, $isGGparams) = sqlIsGG();
             $ggestoes = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
-                       FROM d_estrutura e
+                       FROM {$T_ESTR} e
                        WHERE $isGGsql
                        ORDER BY label", $isGGparams);
 
             // Gerentes
             list($isGersql, $isGerparams) = sqlIsGerente();
             $gerentes = q($pdo, "SELECT DISTINCT e.funcional, e.nome AS label, e.id_agencia
-                       FROM d_estrutura e
+                       FROM {$T_ESTR} e
                        WHERE $isGersql
                        ORDER BY label", $isGerparams);
 
@@ -289,8 +309,7 @@ try {
             $response['indicadores'] = $indicadores;
             $response['subindicadores'] = [];
 
-            echo json_encode($response);
-            exit;
+            ok($response);
         }
 
         case 'resumo':
@@ -304,7 +323,7 @@ try {
             $fim = trim($_GET['data_fim'] ?? '');
 
             if ($ini === '' || $fim === '') {
-                $jsonError('data_ini/data_fim obrigatórios');
+                err('data_ini/data_fim obrigatórios');
             }
 
             $filters = [];
@@ -355,7 +374,7 @@ try {
             }
 
             if ($fid) {
-                $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM d_produto WHERE id_familia = :fid", [':fid' => $fid]);
+                $famKey = q($pdo, "SELECT UPPER(TRIM(MAX(familia))) AS fam_key FROM {$T_PROD} WHERE id_familia = :fid", [':fid' => $fid]);
                 if (!empty($famKey[0]['fam_key'])) {
                     $prodCond .= ' AND UPPER(TRIM(p.familia)) = :famk';
                     $params[':famk'] = $famKey[0]['fam_key'];
@@ -364,12 +383,12 @@ try {
 
             $sqlR = "
                 SELECT SUM(fr.realizado) AS realizado
-                FROM f_realizado fr
-                JOIN d_calendario c ON c.data = fr.data_realizado
-                JOIN d_produto p
+                FROM {$T_FR} fr
+                JOIN {$T_CAL} c ON c.data = fr.data_realizado
+                JOIN {$T_PROD} p
                   ON p.id_indicador = fr.id_indicador
                  AND p.id_subindicador <=> fr.id_subindicador
-                JOIN d_estrutura e ON e.funcional = fr.funcional
+                JOIN {$T_ESTR} e ON e.funcional = fr.funcional
                 WHERE c.data BETWEEN :ini AND :fim
                   AND ($prodCond)
                   $estruturaWhere
@@ -378,29 +397,28 @@ try {
 
             $sqlM = "
                 SELECT SUM(fm.meta_mensal) AS meta
-                FROM f_meta fm
-                JOIN d_calendario c ON c.data = fm.data_meta
-                JOIN d_produto p
+                FROM {$T_FM} fm
+                JOIN {$T_CAL} c ON c.data = fm.data_meta
+                JOIN {$T_PROD} p
                   ON p.id_indicador = fm.id_indicador
                  AND p.id_subindicador <=> fm.id_subindicador
-                JOIN d_estrutura e ON e.funcional = fm.funcional
+                JOIN {$T_ESTR} e ON e.funcional = fm.funcional
                 WHERE c.data BETWEEN DATE_FORMAT(:fim,'%Y-%m-01') AND :fim
                   AND ($prodCond)
                   $estruturaWhere
             ";
             $meta_total = (float) (q($pdo, $sqlM, $params)[0]['meta'] ?? 0);
 
-            echo json_encode([
+            ok([
                 'kpi' => [
                     'realizado_total' => $realizado_total,
                     'meta_total' => $meta_total,
                 ],
                 'updated_at' => date('c'),
             ]);
-            exit;
 
         default:
-            $jsonError('endpoint não encontrado', 404);
+            err('endpoint não encontrado', 404);
     }
 } catch (Throwable $e) {
     http_response_code(500);
