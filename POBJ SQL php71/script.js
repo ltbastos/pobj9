@@ -11699,7 +11699,7 @@ function buildClassicSectionHTML(fam) {
 
     bodyRows += `
 <tr class="resumo-legacy__row resumo-legacy__row--indicator${hasSubs ? ' has-children' : ''}" data-indicador="${indicatorId}">
-  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod">${toggleHTML}</div></td>
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod">${toggleHTML}</div></td>
   <td class="resumo-legacy__col--meta">${indicatorMeta}</td>
   <td class="resumo-legacy__col--real">${indicatorReal}</td>
 </tr>`;
@@ -11711,7 +11711,7 @@ function buildClassicSectionHTML(fam) {
         const subReal = escapeHTML(formatClassicValue(sub.realizado));
         bodyRows += `
 <tr class="resumo-legacy__row resumo-legacy__child-row" data-parent="${indicatorId}" hidden>
-  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod resumo-legacy__prod--child"><span class="resumo-legacy__prod-name">${subLabel}</span></div></td>
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod resumo-legacy__prod--child"><span class="resumo-legacy__prod-name">${subLabel}</span></div></td>
   <td class="resumo-legacy__col--meta">${subMeta}</td>
   <td class="resumo-legacy__col--real">${subReal}</td>
 </tr>`;
@@ -11722,7 +11722,7 @@ function buildClassicSectionHTML(fam) {
   if (!bodyRows) {
     bodyRows = `
 <tr class="resumo-legacy__row">
-  <td class="resumo-legacy__col--prod"><div class="resumo-legacy__prod"><span class="resumo-legacy__prod-name">Sem indicadores</span></div></td>
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod"><span class="resumo-legacy__prod-name">Sem indicadores</span></div></td>
   <td class="resumo-legacy__col--meta">${metaLabel}</td>
   <td class="resumo-legacy__col--real">${realLabel}</td>
 </tr>`;
