@@ -6182,6 +6182,11 @@ function refreshSelectSearchOptions(selectEl, aliasFactory) {
   syncSelectSearchInput(selectEl);
 }
 
+function resolveFamiliaSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
+}
+
 function resolveIndicadorSearchAliases(value, label) {
   const aliases = new Set([value, label]);
   const meta = INDICATOR_CARD_INDEX.get(value) || PRODUCT_INDEX.get(value) || {};
@@ -6303,6 +6308,7 @@ const $regional  = document.getElementById('f-gerencia');
 const $agencia   = document.getElementById('f-agencia');
 const $gg        = document.getElementById('f-ggestao');
 const $gerente   = document.getElementById('f-gerente');
+const $familia   = document.getElementById('f-secao');
 const $indicador = document.getElementById('f-familia');
 const $subindicador = document.getElementById('f-produto');
 
@@ -6313,6 +6319,7 @@ function qs() {
   if ($regional?.value)  p.set('regional_id',  $regional.value);
   if ($agencia?.value)   p.set('agencia_id',   $agencia.value);
   if ($gg?.value)        p.set('gg_funcional', $gg.value);
+  if ($familia?.value)   p.set('familia_id',   $familia.value);
   return p.toString();
 }
 
@@ -6320,6 +6327,12 @@ function buildFiltrosUrl(nivel) {
   const query = qs();
   const base = `${API_BASE}?endpoint=filtros&nivel=${encodeURIComponent(nivel)}`;
   return query ? `${base}&${query}` : base;
+}
+
+function buildIndicadoresUrl() {
+  const base = `${API_BASE}?endpoint=filtros&nivel=indicadores`;
+  const fid = $familia?.value;
+  return fid ? `${base}&familia_id=${encodeURIComponent(fid)}` : base;
 }
 
 function buildSubindicadoresUrl(indicadorId) {
@@ -6336,6 +6349,7 @@ function buildResumoParams() {
   if ($agencia?.value)   params.set('agencia_id', $agencia.value);
   if ($gg?.value)        params.set('gg_funcional', $gg.value);
   if ($gerente?.value)   params.set('gerente_funcional', $gerente.value);
+  if ($familia?.value)   params.set('familia_id', $familia.value);
   if ($indicador?.value) params.set('indicador_id', $indicador.value);
   if ($subindicador?.value) params.set('subindicador_id', $subindicador.value);
   return params.toString();
@@ -6350,8 +6364,13 @@ async function bootstrapFiltros() {
     setOptions($agencia,   data?.agencias,   'Todas');
     setOptions($gg,        data?.ggestoes,   'Todos');
     setOptions($gerente,   data?.gerentes,   'Todos');
+    setOptions($familia,   data?.familias,   'Todas');
     setOptions($indicador, data?.indicadores, 'Todos');
     setOptions($subindicador, data?.subindicadores ?? [], 'Todos');
+    if ($familia) {
+      $familia.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($familia, resolveFamiliaSearchAliases);
+    }
     if ($indicador) {
       $indicador.dataset.apiManaged = '1';
       refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
@@ -6390,6 +6409,21 @@ $segmento?.addEventListener('change', async () => {
   try {
     const d = await apiGet(buildFiltrosUrl('diretorias'));
     setOptions($diretoria, d?.diretorias, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$familia?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar indicadores.';
+  setOptions($indicador, [], 'Todos');
+  setOptions($subindicador, [], 'Todos');
+  refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
+  refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+  try {
+    const res = await apiGet(buildIndicadoresUrl());
+    setOptions($indicador, res?.indicadores, 'Todos');
+    refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
   }

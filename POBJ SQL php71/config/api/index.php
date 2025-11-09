@@ -96,6 +96,22 @@ try {
                 echo json_encode(['agencias' => $rows]); exit;
             }
 
+            if ($nivel === 'indicadores') {
+                $prodParams = [];
+                $prodWhere = '1=1';
+                if (!empty($_GET['familia_id'])) {
+                    $prodWhere .= ' AND p.id_familia = :fid';
+                    $prodParams[':fid'] = (int) $_GET['familia_id'];
+                }
+                $rows = q($pdo, "
+                    SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
+                    FROM d_produto p
+                    WHERE $prodWhere
+                    ORDER BY label
+                ", $prodParams);
+                echo json_encode(['indicadores' => $rows]); exit;
+            }
+
             if ($nivel === 'subindicadores') {
                 $iid = (int) ($_GET['indicador_id'] ?? 0);
                 $rows = q($pdo, "
@@ -174,6 +190,12 @@ try {
                        WHERE e.id_agencia IS NOT NULL AND e.agencia IS NOT NULL
                        ORDER BY label");
 
+            $familias = q($pdo, "
+                SELECT DISTINCT p.id_familia AS id, p.familia AS label
+                FROM d_produto p
+                ORDER BY label
+            ");
+
             $indicadores = q($pdo, "
                 SELECT DISTINCT p.id_indicador AS id, p.indicador AS label
                 FROM d_produto p
@@ -204,6 +226,7 @@ try {
                 'updated_at'       => date('c'),
             ];
 
+            $response['familias'] = $familias;
             $response['indicadores'] = $indicadores;
             $response['subindicadores'] = [];
 
@@ -220,6 +243,7 @@ try {
             $ger = trim($_GET['gerente_funcional'] ?? '');
             $ini = trim($_GET['data_ini'] ?? '');
             $fim = trim($_GET['data_fim'] ?? '');
+            $familiaParam = trim((string)($_GET['familia_id'] ?? $_GET['id_familia'] ?? ''));
             $indicadorParam = trim((string)($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? ''));
             $subIndicadorParam = trim((string)($_GET['subindicador_id'] ?? $_GET['id_subindicador'] ?? ''));
 
@@ -260,15 +284,20 @@ try {
 
             $estruturaWhere = $filters ? ' AND ' . implode(' AND ', $filters) : '';
 
-            $prodCond = '1=1';
+            $prodSql = '1=1';
 
             if ($subIndicadorParam !== '') {
                 $params[':iid'] = (int) ($indicadorParam !== '' ? $indicadorParam : ($_GET['indicador_id'] ?? $_GET['id_indicador'] ?? 0));
                 $params[':sid'] = (int) $subIndicadorParam;
-                $prodCond = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
+                $prodSql = 'p.id_indicador = :iid AND p.id_subindicador = :sid';
             } elseif ($indicadorParam !== '') {
                 $params[':iid'] = (int) $indicadorParam;
-                $prodCond = 'p.id_indicador = :iid';
+                $prodSql = 'p.id_indicador = :iid';
+            }
+
+            if ($familiaParam !== '') {
+                $params[':fid'] = (int) $familiaParam;
+                $prodSql = '(' . $prodSql . ') AND p.id_familia = :fid';
             }
 
             $sqlReal = "
@@ -280,7 +309,7 @@ try {
                  AND p.id_subindicador <=> fr.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fr.funcional
                 WHERE c.data BETWEEN :ini AND :fim
-                  AND ($prodCond)
+                  AND ($prodSql)
                   $estruturaWhere
             ";
             $real = q($pdo, $sqlReal, $params);
@@ -294,7 +323,7 @@ try {
                  AND p.id_subindicador <=> fm.id_subindicador
                 JOIN d_estrutura e ON e.funcional = fm.funcional
                 WHERE c.data BETWEEN DATE_FORMAT(:fim,'%Y-%m-01') AND :fim
-                  AND ($prodCond)
+                  AND ($prodSql)
                   $estruturaWhere
             ";
             $meta = q($pdo, $sqlMeta, $params);
