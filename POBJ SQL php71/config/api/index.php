@@ -23,14 +23,8 @@ try {
 
     function q(PDO $pdo, string $sql, array $p = []) {
       $st = $pdo->prepare($sql);
-      $pos = 1;
       foreach ($p as $k => $v) {
-        if (is_int($k)) {
-          $st->bindValue($pos, $v);
-          $pos++;
-        } else {
-          $st->bindValue($k, $v);
-        }
+        $st->bindValue(is_int($k) ? $k + 1 : $k, $v);
       }
       $st->execute();
       return $st->fetchAll(PDO::FETCH_ASSOC);

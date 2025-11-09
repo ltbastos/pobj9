@@ -6338,7 +6338,9 @@ function buildFiltrosUrl(nivel) {
 function buildIndicadoresUrl() {
   const base = `${API_BASE}?endpoint=filtros&nivel=indicadores`;
   const fid = toInt($familia?.value);
-  return fid ? `${base}&familia_id=${encodeURIComponent(fid)}` : base;
+  if (!fid) return base;
+  const fidValue = String(fid);
+  return `${base}&familia_id=${encodeURIComponent(fidValue)}`;
 }
 
 function buildSubindicadoresUrl(indicadorId) {
@@ -6510,7 +6512,8 @@ $indicador?.addEventListener('change', async () => {
   }
   let resetFamilia = false;
   try {
-    const info = await apiGet(`${API_BASE}?endpoint=filtros&nivel=produto_info&indicador_id=${encodeURIComponent(iid)}`);
+    const iidValue = String(iid);
+    const info = await apiGet(`${API_BASE}?endpoint=filtros&nivel=produto_info&indicador_id=${encodeURIComponent(iidValue)}`);
     if (info?.familia_id && $familia) {
       const desired = String(info.familia_id);
       if (String($familia.value || '') !== desired) {
