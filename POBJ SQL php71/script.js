@@ -6417,6 +6417,14 @@ async function bootstrapFiltros() {
     setOptions($familia,   data?.familias,   'Todas');
     setOptions($indicador, data?.indicadores, 'Todos');
     setOptions($subindicador, data?.subindicadores ?? [], 'Todos');
+    if ($indicador) {
+      const hasIndicadores = Array.isArray(data?.indicadores) && data.indicadores.length > 0;
+      $indicador.disabled = !hasIndicadores;
+    }
+    if ($subindicador) {
+      const hasSubs = Array.isArray(data?.subindicadores) && data.subindicadores.length > 0;
+      $subindicador.disabled = !hasSubs;
+    }
     if ($familia) {
       $familia.dataset.apiManaged = '1';
       refreshSelectSearchOptions($familia, resolveFamiliaSearchAliases);
@@ -6468,13 +6476,20 @@ $familia?.addEventListener('change', async () => {
   const context = 'Falha ao atualizar indicadores.';
   const triggeredProgrammatically = $familia?.dataset?.updating === '1';
   const keepIndicatorValue = triggeredProgrammatically && $indicador ? $indicador.value : '';
+  if ($indicador) $indicador.disabled = true;
+  if ($subindicador) $subindicador.disabled = true;
   setOptions($indicador, [], 'Todos');
   setOptions($subindicador, [], 'Todos');
   refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
   refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
   try {
     const res = await apiGet(buildIndicadoresUrl());
-    setOptions($indicador, res?.indicadores, 'Todos');
+    const indicadores = Array.isArray(res?.indicadores) ? res.indicadores : [];
+    setOptions($indicador, indicadores, 'Todos');
+    if ($indicador) {
+      $indicador.disabled = indicadores.length === 0;
+      if ($indicador.dataset.search === 'true') syncSelectSearchInput($indicador);
+    }
     if (triggeredProgrammatically && keepIndicatorValue) {
       const options = Array.from($indicador?.options ?? []);
       const hasPrevious = options.some(opt => String(opt.value) === String(keepIndicatorValue));
@@ -6486,6 +6501,13 @@ $familia?.addEventListener('change', async () => {
     refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
+  } finally {
+    if (!triggeredProgrammatically) {
+      if ($subindicador) {
+        $subindicador.disabled = true;
+        refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+      }
+    }
   }
 });
 
@@ -6545,6 +6567,7 @@ $indicador?.addEventListener('change', async () => {
   setOptions($subindicador, [], 'Todos');
   refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
   const iid = toInt(rawId);
+  if ($subindicador) $subindicador.disabled = true;
   if (!iid) {
     return;
   }
@@ -6562,7 +6585,16 @@ $indicador?.addEventListener('change', async () => {
         $familia.dispatchEvent(new Event('change'));
       }
     }
-    setOptions($subindicador, info?.subindicadores || [], 'Todos');
+    let subOptions = [];
+    if (info?.has_sub) {
+      const subs = await apiGet(buildSubindicadoresUrl(iidValue));
+      subOptions = Array.isArray(subs?.subindicadores) ? subs.subindicadores : [];
+    }
+    setOptions($subindicador, subOptions, 'Todos');
+    if ($subindicador) {
+      $subindicador.disabled = subOptions.length === 0;
+      if ($subindicador.dataset.search === 'true') syncSelectSearchInput($subindicador);
+    }
     refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
   } catch (error) {
     handleApiError(context, error);
@@ -11487,26 +11519,23 @@ function renderResumoKPI(summary, context = {}) {
 
   const cards = [];
   const resumoApi = state?.apiResumo;
-  if (resumoApi && (Number.isFinite(resumoApi.meta) || Number.isFinite(resumoApi.realizado))) {
-    const metaResumo = toNumber(resumoApi.meta);
-    const realizadoResumo = toNumber(resumoApi.realizado);
-    cards.push(buildCard(
-      "Metas do período",
-      "ti ti-target-arrow",
-      realizadoResumo,
-      metaResumo,
-      "brl",
-      realizadoResumo,
-      metaResumo,
-      {
-        labelText: "Metas do período",
-        labelHTML: 'Metas do <span class="kpi-label-emphasis">período</span>'
-      }
-    ));
-  }
+  const resumoRealizado = resumoApi ? toNumber(resumoApi.realizado) : null;
+  const resumoMeta = resumoApi ? toNumber(resumoApi.meta) : null;
 
   cards.push(
-    buildCard("Indicadores", "ti ti-list-check", indicadoresAtingidos, indicadoresTotal, "int", visibleItemsHitCount),
+    buildCard(
+      "Indicadores",
+      "ti ti-list-check",
+      Number.isFinite(resumoRealizado) ? resumoRealizado : indicadoresAtingidos,
+      Number.isFinite(resumoMeta) ? resumoMeta : indicadoresTotal,
+      Number.isFinite(resumoRealizado) || Number.isFinite(resumoMeta) ? "brl" : "int",
+      Number.isFinite(resumoRealizado) ? resumoRealizado : visibleItemsHitCount,
+      Number.isFinite(resumoMeta) ? resumoMeta : indicadoresTotal,
+      Number.isFinite(resumoRealizado) || Number.isFinite(resumoMeta) ? {
+        labelText: "Indicadores",
+        labelHTML: 'Indicadores <span class="kpi-label-emphasis">(Resumo)</span>'
+      } : undefined
+    ),
     buildCard("Pontos", "ti ti-medal", pontosAtingidos, pontosTotal, "pts", visiblePointsHit),
     buildCard(
       "Variável Estimada",
