@@ -66,6 +66,7 @@ const DATA_SOURCE = "sql";
 const API_PATH = typeof window !== "undefined" && window.API_URL
   ? String(window.API_URL)
   : "config/api/index.php";
+const API_BASE = 'config/api/index.php';
 const DEFAULT_HTTP_BASE = "http://localhost/POBJ%20SQL%20php71/";
 const API_HTTP_BASE = typeof window !== "undefined" && window.API_HTTP_BASE
   ? String(window.API_HTTP_BASE)
@@ -233,6 +234,23 @@ const AGENT_ENDPOINT = (() => {
 // Aqui eu criei atalhos para querySelector e querySelectorAll porque uso isso o tempo todo.
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
+
+const valOrEmpty = (value) => {
+  if (value == null) return "";
+  const text = String(value).trim();
+  return text;
+};
+
+const toQuery = (obj) => Object.entries(obj)
+  .filter(([, value]) => valOrEmpty(value) !== '')
+  .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(valOrEmpty(value))}`)
+  .join('&');
+
+async function fetchJSON(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
 // Aqui eu preparo alguns formatadores (moeda, inteiro, número com 1 casa) para reaproveitar sem recalcular.
 const fmtBRL = new Intl.NumberFormat("pt-BR", { style:"currency", currency:"BRL" });
 const fmtINT = new Intl.NumberFormat("pt-BR");
@@ -395,20 +413,6 @@ let RANKING_AGENCIAS = [];
 let RANKING_GERENTES = [];
 let GERENTES_GESTAO = [];
 let SEGMENTOS_DATA = [];
-const SEGMENT_SCENARIO_DEFAULT = "varejo";
-const SEGMENT_SCENARIO_PRESETS = [
-  { id: "D.R. VAREJO DIGITAL",          nome: "D.R. VAREJO DIGITAL",          slug: "dr_varejo_digital",          scenario: "varejo",   order: 10 },
-  { id: "SUPER. PJ NEGÓCIOS DIG.",      nome: "SUPER. PJ NEGÓCIOS DIG.",      slug: "super_pj_negocios_dig",      scenario: "varejo",   order: 20 },
-  { id: "SUPER. PF CLASSIC DIG.",       nome: "SUPER. PF CLASSIC DIG.",       slug: "super_pf_classic_dig",       scenario: "varejo",   order: 30 },
-  { id: "D.R. EMPRESAS",                nome: "D.R. EMPRESAS",                slug: "dr_empresas",                scenario: "empresas", order: 40 },
-  { id: "SUPER. VAREJO PRIME EMPRESAS", nome: "SUPER. VAREJO PRIME EMPRESAS", slug: "super_varejo_prime_empresas", scenario: "empresas", order: 50 },
-  { id: "VAREJO + PF DIGITAL",          nome: "VAREJO + PF DIGITAL",          slug: "varejo_pf_digital",          scenario: "varejo",   order: 60 },
-  { id: "Varejo",                       nome: "Varejo",                       slug: "varejo",                     scenario: "varejo",   order: 70, hidden: true },
-  { id: "Empresas",                     nome: "Empresas",                     slug: "empresas",                   scenario: "empresas", order: 80, hidden: true },
-];
-let SEGMENT_SCENARIO_INDEX = new Map();
-const SEGMENT_DIMENSION_MAP = new Map();
-let CURRENT_SEGMENT_SCENARIO = SEGMENT_SCENARIO_DEFAULT;
 
 // Aqui eu tenho mapas auxiliares para ligar produto, família e seção.
 let PRODUTOS_BY_FAMILIA = new Map();
@@ -530,10 +534,10 @@ const CARD_ALIAS_INDEX = new Map(); // cardId -> Set(alias)
 const CARD_SLUG_TO_ID = new Map();  // slug -> cardId
 const CARD_ID_SET = new Set();      // conjunto rápido dos ids oficiais
 const SUBPRODUTO_TO_INDICADOR = new Map(); // slug do subproduto -> cardId
-const GLOBAL_INDICATOR_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, indicadorNome, familiaId, familiaNome, scenario, key }]
-const GLOBAL_INDICATOR_META = new Map(); // `${scenario}::${indicadorId}` -> meta
-const GLOBAL_SUB_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, subId, subNome, familiaId, familiaNome, scenario, indicadorKey }]
-const GLOBAL_SUB_BY_INDICATOR = new Map(); // `${scenario}::${indicadorId}` -> Map(subId -> meta)
+const GLOBAL_INDICATOR_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, indicadorNome, familiaId, familiaNome, key }]
+const GLOBAL_INDICATOR_META = new Map(); // indicadorId -> meta
+const GLOBAL_SUB_ALIAS_INDEX = new Map(); // slug -> [{ indicadorId, subId, subNome, familiaId, familiaNome, indicadorKey }]
+const GLOBAL_SUB_BY_INDICATOR = new Map(); // indicadorId -> Map(subId -> meta)
 
 function registrarAliasIndicador(cardId, alias){
   const seguroId = limparTexto(cardId);
@@ -639,19 +643,12 @@ function matchesSegmentFilter(filterValue, ...candidates){
   const esperado = limparTexto(filterValue);
   if (!esperado) return false;
   if (matchesSelection(filterValue, ...candidates)) return true;
-  const esperadoScenario = getSegmentScenarioFromValue(esperado);
-  if (!esperadoScenario) return false;
   const lista = [];
   candidates.forEach(item => {
     if (Array.isArray(item)) lista.push(...item);
     else lista.push(item);
   });
-  return lista.some(candidate => {
-    const valor = limparTexto(candidate);
-    if (!valor) return false;
-    const scenario = getSegmentScenarioFromValue(valor);
-    return scenario === esperadoScenario;
-  });
+  return lista.some(candidate => limparTexto(candidate) === esperado);
 }
 
 function resetSubIndicatorOptionCache(){
@@ -2119,7 +2116,23 @@ function montarHierarquiaMesu(rows){
       segmentoLabel: base.segmentoLabel || label,
     };
   }).filter(Boolean);
-  SEGMENTOS_DATA = mergeSegmentPresets(normalizedSegments, (a, b) => String(a?.nome || "").localeCompare(String(b?.nome || ""), 'pt-BR', { sensitivity: 'base' }));
+  const segmentoMap = new Map();
+  normalizedSegments.forEach(seg => {
+    const key = limparTexto(seg?.id);
+    if (!key) return;
+    if (!segmentoMap.has(key)) {
+      segmentoMap.set(key, { ...seg });
+      return;
+    }
+    const current = segmentoMap.get(key);
+    if (seg.nome && !current.nome) current.nome = seg.nome;
+    if (seg.label && !current.label) current.label = seg.label;
+    if (Array.isArray(seg.aliases) && seg.aliases.length) {
+      const aliasSet = new Set([...(current.aliases || []), ...seg.aliases]);
+      current.aliases = Array.from(aliasSet).filter(Boolean);
+    }
+  });
+  SEGMENTOS_DATA = Array.from(segmentoMap.values()).sort((a, b) => String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt-BR', { sensitivity: 'base' }));
 
   const diretoriaOptions = DIMENSION_FILTER_OPTIONS.diretoria.length
     ? DIMENSION_FILTER_OPTIONS.diretoria
@@ -2334,8 +2347,6 @@ function montarHierarquiaMesu(rows){
   SEGMENTO_LABEL_INDEX = new Map();
   SEGMENTOS_DATA.forEach(seg => registerLabelIndexEntry(SEGMENTO_LABEL_INDEX, seg, seg.id, seg.nome, seg.label));
 
-  rebuildSegmentScenarioIndex();
-
   if (!CURRENT_USER_CONTEXT.diretoria && rows.length){
     const first = rows[0];
     CURRENT_USER_CONTEXT = {
@@ -2348,237 +2359,6 @@ function montarHierarquiaMesu(rows){
   }
 }
 
-function getPresetScenarioBySlug(slug){
-  const normalized = simplificarTexto(slug);
-  if (!normalized) return undefined;
-  const preset = SEGMENT_SCENARIO_PRESETS.find(item => {
-    const candidates = [item.slug, item.id, item.nome].map(val => simplificarTexto(val));
-    return candidates.some(value => value && value === normalized);
-  });
-  return preset?.scenario;
-}
-
-function mergeSegmentPresets(list = [], compareFn){
-  const manual = [];
-  const slugToManual = new Map();
-
-  const registerManualSlug = (slug, entry) => {
-    const normalized = simplificarTexto(slug);
-    if (!normalized) return;
-    slugToManual.set(normalized, entry);
-  };
-
-  const manualUsed = new Set();
-
-  SEGMENT_SCENARIO_PRESETS.forEach((preset, idx) => {
-    const slug = simplificarTexto(preset.slug || preset.nome || preset.id);
-    const value = limparTexto(preset.id) || limparTexto(preset.value) || slug || preset.nome || preset.slug || '';
-    const label = limparTexto(preset.nome) || limparTexto(preset.label) || value;
-    const scenario = preset.scenario || SEGMENT_SCENARIO_DEFAULT;
-    const order = Number.isFinite(preset.order) ? Number(preset.order) : idx;
-    const entry = {
-      id: value || slug || '',
-      nome: label || value || '',
-      label: label || value || '',
-      scenario,
-      slug,
-      order,
-      hidden: Boolean(preset.hidden),
-      source: "preset",
-      aliases: []
-    };
-    if (Array.isArray(preset.aliases)) {
-      preset.aliases.forEach(alias => {
-        const clean = limparTexto(alias);
-        if (clean && !entry.aliases.includes(clean)) entry.aliases.push(clean);
-      });
-    }
-    manual.push(entry);
-    registerManualSlug(slug, entry);
-    registerManualSlug(value, entry);
-    registerManualSlug(label, entry);
-  });
-
-  const extras = [];
-  const seen = new Set(slugToManual.keys());
-
-  list.forEach(seg => {
-    if (!seg) return;
-    const value = limparTexto(seg.id) || limparTexto(seg.value) || limparTexto(seg.nome) || '';
-    const label = limparTexto(seg.nome) || limparTexto(seg.label) || value;
-    const slug = simplificarTexto(seg.slug || seg.nome || seg.id || seg.value);
-    const scenario = seg.scenario
-      || getPresetScenarioBySlug(slug)
-      || getPresetScenarioBySlug(value)
-      || SEGMENT_SCENARIO_DEFAULT;
-
-    const candidateSlugs = [slug, simplificarTexto(value), simplificarTexto(label)].filter(Boolean);
-    const labelName = extractNameFromLabel(label);
-    if (labelName) {
-      const simplifiedLabelName = simplificarTexto(labelName);
-      if (simplifiedLabelName && !candidateSlugs.includes(simplifiedLabelName)) {
-        candidateSlugs.push(simplifiedLabelName);
-      }
-    }
-    const matchSlug = candidateSlugs.find(key => slugToManual.has(key));
-    if (matchSlug) {
-      const manualEntry = slugToManual.get(matchSlug);
-      if (manualEntry) {
-        manualUsed.add(manualEntry);
-        if (seg.id) manualEntry.id = limparTexto(seg.id) || manualEntry.id;
-        if (seg.nome) manualEntry.nome = limparTexto(seg.nome) || manualEntry.nome;
-        if (seg.label) manualEntry.label = limparTexto(seg.label) || manualEntry.label || manualEntry.nome;
-        if (seg.slug) manualEntry.slug = seg.slug;
-        if (seg.scenario) manualEntry.scenario = seg.scenario;
-        if (!manualEntry.id && value) manualEntry.id = value;
-        if (!manualEntry.nome && label) manualEntry.nome = label;
-        if (!manualEntry.label && label) manualEntry.label = label;
-        if (Array.isArray(manualEntry.aliases)) {
-          candidateSlugs.forEach(key => {
-            if (!key) return;
-            const alias = limparTexto(key);
-            if (alias && !manualEntry.aliases.includes(alias)) manualEntry.aliases.push(alias);
-          });
-        }
-        if (Array.isArray(seg.aliases)) {
-          seg.aliases.forEach(alias => {
-            const clean = limparTexto(alias);
-            if (clean && !manualEntry.aliases.includes(clean)) manualEntry.aliases.push(clean);
-          });
-        }
-        if (Number.isFinite(seg.order)) manualEntry.order = Number(seg.order);
-        if (seg.hidden != null) manualEntry.hidden = Boolean(seg.hidden);
-        else manualEntry.hidden = false;
-        candidateSlugs.forEach(key => registerManualSlug(key, manualEntry));
-      }
-      return;
-    }
-
-    if (candidateSlugs.some(key => seen.has(key))) return;
-
-    const entry = {
-      id: value || slug || '',
-      nome: label || value || '',
-      label: label || value || '',
-      scenario,
-      slug,
-      source: "data",
-      aliases: []
-    };
-    if (Number.isFinite(seg.order)) entry.order = Number(seg.order);
-    if (seg.hidden != null) entry.hidden = Boolean(seg.hidden);
-    extras.push(entry);
-    candidateSlugs.forEach(key => seen.add(key));
-  });
-
-  const comparator = typeof compareFn === 'function'
-    ? compareFn
-    : (a, b) => String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt-BR', { sensitivity: 'base' });
-  extras.sort(comparator);
-
-  const filteredManual = manual.filter(entry => manualUsed.has(entry));
-  const combined = filteredManual.concat(extras);
-  if (!combined.length) return manual.slice().sort(comparator);
-  combined.sort(comparator);
-  return combined;
-}
-
-function rebuildSegmentScenarioIndex(){
-  const register = (value, scenario) => {
-    const slug = simplificarTexto(value);
-    if (!slug) return;
-    if (!SEGMENT_SCENARIO_INDEX.has(slug)) SEGMENT_SCENARIO_INDEX.set(slug, scenario);
-  };
-
-  SEGMENT_SCENARIO_INDEX = new Map();
-
-  SEGMENT_SCENARIO_PRESETS.forEach(preset => {
-    const scenario = preset.scenario || SEGMENT_SCENARIO_DEFAULT;
-    register(preset.id, scenario);
-    register(preset.nome, scenario);
-    register(preset.slug, scenario);
-  });
-
-  SEGMENTOS_DATA.forEach(seg => {
-    if (!seg) return;
-    const scenario = seg.scenario
-      || getPresetScenarioBySlug(seg.slug)
-      || getPresetScenarioBySlug(seg.id)
-      || getPresetScenarioBySlug(seg.nome)
-      || SEGMENT_SCENARIO_DEFAULT;
-    register(seg.id, scenario);
-    register(seg.nome, scenario);
-    register(seg.slug, scenario);
-  });
-
-  register('', SEGMENT_SCENARIO_DEFAULT);
-  register('todos', SEGMENT_SCENARIO_DEFAULT);
-}
-
-function normalizeScenarioKey(value){
-  const slug = simplificarTexto(value);
-  return slug || SEGMENT_SCENARIO_DEFAULT;
-}
-
-function getSegmentScenarioFromValue(value){
-  const slug = simplificarTexto(value);
-  if (!slug || slug === 'todos') return SEGMENT_SCENARIO_DEFAULT;
-  return SEGMENT_SCENARIO_INDEX.get(slug) || SEGMENT_SCENARIO_DEFAULT;
-}
-
-function applySegmentDimension(nextScenario){
-  const key = normalizeScenarioKey(nextScenario);
-  let rows = SEGMENT_DIMENSION_MAP.get(key);
-
-  if (!Array.isArray(rows) || !rows.length) {
-    const pick = (map) => {
-      if (!(map instanceof Map)) return null;
-      return map.get(key)
-        || map.get(SEGMENT_SCENARIO_DEFAULT)
-        || map.get("default")
-        || map.get("todos")
-        || null;
-    };
-
-    const candidates = [];
-    if (typeof window !== "undefined") {
-      candidates.push(window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap);
-    } else {
-      candidates.push(segMap, dirMap, regMap, ageMap, agMap);
-    }
-
-    for (const candidate of candidates) {
-      const fallback = pick(candidate);
-      if (Array.isArray(fallback) && fallback.length) {
-        rows = fallback;
-        break;
-      }
-    }
-  }
-
-  if (!Array.isArray(rows) || !rows.length) {
-    rows = SEGMENT_DIMENSION_MAP.get(SEGMENT_SCENARIO_DEFAULT) || [];
-  }
-
-  DIM_PRODUTOS = rows.map(row => ({ ...row }));
-  rebuildCardCatalogFromDimension(DIM_PRODUTOS);
-  montarCatalogoDeProdutos(DIM_PRODUTOS);
-  CURRENT_SEGMENT_SCENARIO = key;
-  if (typeof state !== 'undefined' && state && typeof state === 'object') {
-    if (!state._raw) state._raw = {};
-    state._raw.dimProdutos = DIM_PRODUTOS;
-  }
-}
-
-function ensureSegmentScenarioFromFilters(){
-  const select = $('#f-segmento');
-  if (!select) return;
-  const desired = select.value || '';
-  const scenario = getSegmentScenarioFromValue(desired);
-  if (scenario === CURRENT_SEGMENT_SCENARIO) return;
-  applySegmentDimension(scenario);
-  initCombos();
-}
 function montarCatalogoDeProdutos(dimRows){
   const rows = Array.isArray(dimRows) ? dimRows : [];
   const famMap = new Map();
@@ -2835,8 +2615,7 @@ function normalizarLinhasFatoRealizados(rows){
     const quantidade = toNumber(lerCelula(raw, ["Quantidade", "Qtd"]));
     const variavelReal = toNumber(lerCelula(raw, ["Variavel Real", "Variável Real"]));
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -2846,7 +2625,7 @@ function normalizarLinhasFatoRealizados(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = subproduto;
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -2892,7 +2671,6 @@ function normalizarLinhasFatoRealizados(rows){
       qtd: quantidade,
       variavelReal,
     };
-    if (scenarioHint) base.segmentoScenario = scenarioHint;
     if (familiaCodigo) base.familiaCodigo = familiaCodigo;
     if (indicadorCodigo) base.indicadorCodigo = indicadorCodigo;
     if (subCodigo) base.subindicadorCodigo = subCodigo;
@@ -3025,8 +2803,7 @@ function normalizarLinhasFatoMetas(rows){
       competencia = `${data.slice(0, 7)}-01`;
     }
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -3036,7 +2813,7 @@ function normalizarLinhasFatoMetas(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = subproduto;
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo, subproduto], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -3082,7 +2859,6 @@ function normalizarLinhasFatoMetas(rows){
       variavelMeta,
       peso,
     };
-    if (scenarioHint) base.segmentoScenario = scenarioHint;
     if (familiaCodigo) base.familiaCodigo = familiaCodigo;
     if (indicadorCodigo) base.indicadorCodigo = indicadorCodigo;
     if (subCodigo) base.subindicadorCodigo = subCodigo;
@@ -3162,7 +2938,7 @@ function normalizarLinhasFatoVariavel(rows){
     if (!competencia && data) {
       competencia = `${data.slice(0, 7)}-01`;
     }
-    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra], "");
+    const indicadorRes = resolveIndicatorFromDimension([produtoId, produtoNome, indicadorCodigoExtra]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) produtoId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) produtoNome = indicadorRes.indicadorNome;
@@ -3172,7 +2948,7 @@ function normalizarLinhasFatoVariavel(rows){
 
     let resolvedSubId = subSlug;
     let resolvedSubNome = "";
-    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo], indicadorRes, "");
+    const subRes = resolveSubIndicatorFromDimension([subSlug, subCodigo], indicadorRes);
     if (subRes) {
       if (subRes.subId) resolvedSubId = subRes.subId;
       if (subRes.subNome) resolvedSubNome = subRes.subNome;
@@ -3700,95 +3476,91 @@ function registerGlobalSubAliasEntry(meta, alias){
 
 function rebuildGlobalDimensionAliasIndex(){
   resetGlobalDimensionAliasIndex();
-  SEGMENT_DIMENSION_MAP.forEach((rows, scenarioKey) => {
-    const scenario = normalizeScenarioKey(scenarioKey);
-    const list = Array.isArray(rows) ? rows : [];
-    list.forEach(row => {
-      if (!row) return;
-      const indicadorId = limparTexto(row.indicadorId);
-      if (!indicadorId) return;
-      const indicadorNome = limparTexto(row.indicadorNome) || indicadorId;
-      const familiaId = limparTexto(row.familiaId) || limparTexto(row.familiaSlug) || limparTexto(row.familiaCodigo) || "";
-      const familiaNome = limparTexto(row.familiaNome) || limparTexto(row.familia) || familiaId;
-      const indicatorKey = `${scenario}::${indicadorId}`;
-      let indicatorMeta = GLOBAL_INDICATOR_META.get(indicatorKey);
-      if (!indicatorMeta) {
-        indicatorMeta = {
-          indicadorId,
-          indicadorNome,
-          familiaId,
-          familiaNome,
-          scenario,
-          key: indicatorKey,
-          aliases: new Set(),
-        };
-        GLOBAL_INDICATOR_META.set(indicatorKey, indicatorMeta);
-      } else {
-        if (indicadorNome) indicatorMeta.indicadorNome = indicadorNome;
-        if (familiaId) indicatorMeta.familiaId = familiaId;
-        if (familiaNome) indicatorMeta.familiaNome = familiaNome;
-      }
-
-      const aliasCandidates = [
+  const list = Array.isArray(DIM_PRODUTOS) ? DIM_PRODUTOS : [];
+  list.forEach(row => {
+    if (!row) return;
+    const indicadorId = limparTexto(row.indicadorId);
+    if (!indicadorId) return;
+    const indicadorNome = limparTexto(row.indicadorNome) || indicadorId;
+    const familiaId = limparTexto(row.familiaId) || limparTexto(row.familiaSlug) || limparTexto(row.familiaCodigo) || "";
+    const familiaNome = limparTexto(row.familiaNome) || limparTexto(row.familia) || familiaId;
+    const indicatorKey = indicadorId;
+    let indicatorMeta = GLOBAL_INDICATOR_META.get(indicatorKey);
+    if (!indicatorMeta) {
+      indicatorMeta = {
         indicadorId,
         indicadorNome,
-        limparTexto(row.indicadorCodigo),
-        ...(Array.isArray(row.indicadorAliases) ? row.indicadorAliases : [])
-      ];
-      aliasCandidates.forEach(alias => {
-        const texto = limparTexto(alias);
-        if (!texto) return;
-        indicatorMeta.aliases.add(texto);
-        registerGlobalIndicatorAliasEntry(indicatorMeta, texto);
-      });
+        familiaId,
+        familiaNome,
+        key: indicatorKey,
+        aliases: new Set(),
+      };
+      GLOBAL_INDICATOR_META.set(indicatorKey, indicatorMeta);
+    } else {
+      if (indicadorNome) indicatorMeta.indicadorNome = indicadorNome;
+      if (familiaId) indicatorMeta.familiaId = familiaId;
+      if (familiaNome) indicatorMeta.familiaNome = familiaNome;
+    }
 
-      let subMap = GLOBAL_SUB_BY_INDICATOR.get(indicatorKey);
-      if (!subMap) {
-        subMap = new Map();
-        GLOBAL_SUB_BY_INDICATOR.set(indicatorKey, subMap);
-      }
+    const aliasCandidates = [
+      indicadorId,
+      indicadorNome,
+      limparTexto(row.indicadorCodigo),
+      ...(Array.isArray(row.indicadorAliases) ? row.indicadorAliases : [])
+    ];
+    aliasCandidates.forEach(alias => {
+      const texto = limparTexto(alias);
+      if (!texto) return;
+      indicatorMeta.aliases.add(texto);
+      registerGlobalIndicatorAliasEntry(indicatorMeta, texto);
+    });
 
-      const subId = limparTexto(row.subId);
-      if (subId) {
-        const subNome = limparTexto(row.subNome) || subId;
-        const subKey = `${indicatorKey}::${subId}`;
-        let subMeta = subMap.get(subId);
-        if (!subMeta) {
-          subMeta = {
-            indicadorId,
-            indicadorKey: indicatorKey,
-            subId,
-            subNome,
-            familiaId,
-            familiaNome,
-            scenario,
-            key: subKey,
-            aliases: new Set(),
-          };
-          subMap.set(subId, subMeta);
-        } else {
-          if (subNome) subMeta.subNome = subNome;
-        }
+    let subMap = GLOBAL_SUB_BY_INDICATOR.get(indicatorKey);
+    if (!subMap) {
+      subMap = new Map();
+      GLOBAL_SUB_BY_INDICATOR.set(indicatorKey, subMap);
+    }
 
-        const subAliasCandidates = [
+    const subId = limparTexto(row.subId);
+    if (subId) {
+      const subNome = limparTexto(row.subNome) || subId;
+      const subKey = `${indicatorKey}::${subId}`;
+      let subMeta = subMap.get(subId);
+      if (!subMeta) {
+        subMeta = {
+          indicadorId,
+          indicadorKey: indicatorKey,
           subId,
           subNome,
-          limparTexto(row.subCodigo),
-          ...(Array.isArray(row.subAliases) ? row.subAliases : [])
-        ];
-        subAliasCandidates.forEach(alias => {
-          const texto = limparTexto(alias);
-          if (!texto) return;
-          subMeta.aliases.add(texto);
-          registerGlobalSubAliasEntry(subMeta, texto);
-        });
+          familiaId,
+          familiaNome,
+          key: subKey,
+          aliases: new Set(),
+        };
+        subMap.set(subId, subMeta);
+      } else {
+        if (subNome) subMeta.subNome = subNome;
+        if (familiaId) subMeta.familiaId = familiaId;
+        if (familiaNome) subMeta.familiaNome = familiaNome;
       }
-    });
+
+      const subAliasCandidates = [
+        subId,
+        subNome,
+        limparTexto(row.subCodigo),
+        ...(Array.isArray(row.subAliases) ? row.subAliases : [])
+      ];
+      subAliasCandidates.forEach(alias => {
+        const texto = limparTexto(alias);
+        if (!texto) return;
+        subMeta.aliases.add(texto);
+        registerGlobalSubAliasEntry(subMeta, texto);
+      });
+    }
   });
 }
 
-function resolveIndicatorFromDimension(candidates, scenarioHint = "") {
-  const scenario = scenarioHint ? normalizeScenarioKey(scenarioHint) : "";
+function resolveIndicatorFromDimension(candidates) {
   const values = Array.isArray(candidates) ? candidates : [candidates];
   const aliases = [];
   values.forEach(value => {
@@ -3803,18 +3575,13 @@ function resolveIndicatorFromDimension(candidates, scenarioHint = "") {
     if (!key) continue;
     const entries = GLOBAL_INDICATOR_ALIAS_INDEX.get(key);
     if (!entries || !entries.length) continue;
-    if (scenario) {
-      const matchScenario = entries.find(entry => entry.scenario === scenario);
-      if (matchScenario) return matchScenario;
-    }
     return entries[0];
   }
   return null;
 }
 
-function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null, scenarioHint = "") {
-  const scenario = indicatorMeta?.scenario || (scenarioHint ? normalizeScenarioKey(scenarioHint) : "");
-  const indicatorKey = indicatorMeta?.key || (indicatorMeta && scenario ? `${scenario}::${indicatorMeta.indicadorId}` : "");
+function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null) {
+  const indicatorKey = indicatorMeta?.key || "";
   const values = Array.isArray(candidates) ? candidates : [candidates];
   const aliases = [];
   values.forEach(value => {
@@ -3846,10 +3613,6 @@ function resolveSubIndicatorFromDimension(candidates, indicatorMeta = null, scen
     if (indicatorKey) {
       const indicatorMatch = entries.find(entry => entry.indicadorKey === indicatorKey);
       if (indicatorMatch) return indicatorMatch;
-    }
-    if (scenario) {
-      const scenarioMatch = entries.find(entry => entry.scenario === scenario);
-      if (scenarioMatch) return scenarioMatch;
     }
     return entries[0];
   }
@@ -3939,8 +3702,7 @@ function normalizarLinhasFatoDetalhes(rows){
     const pontos = toNumber(lerCelula(raw, ["Pontos", "pontos", "pontos_cumpridos", "Pontos Cumpridos"]));
     const statusId = limparTexto(lerCelula(raw, ["Status ID", "status_id", "Status"]));
 
-    const scenarioHint = getSegmentScenarioFromValue(segmento) || getSegmentScenarioFromValue(segmentoId) || "";
-    const indicadorRes = resolveIndicatorFromDimension([indicadorId, indicadorNome], scenarioHint);
+    const indicadorRes = resolveIndicatorFromDimension([indicadorId, indicadorNome]);
     if (indicadorRes) {
       if (indicadorRes.indicadorId) indicadorId = indicadorRes.indicadorId;
       if (indicadorRes.indicadorNome) indicadorNome = indicadorRes.indicadorNome;
@@ -3948,7 +3710,7 @@ function normalizarLinhasFatoDetalhes(rows){
       if (indicadorRes.familiaNome) familiaNome = indicadorRes.familiaNome;
     }
 
-    const subRes = resolveSubIndicatorFromDimension([subId, subNome], indicadorRes, scenarioHint);
+    const subRes = resolveSubIndicatorFromDimension([subId, subNome], indicadorRes);
     if (subRes) {
       if (subRes.subId) subId = subRes.subId;
       if (subRes.subNome) subNome = subRes.subNome;
@@ -4320,39 +4082,15 @@ function processBaseDataSources({
 
   const produtosDimRows = Array.isArray(produtosDimRaw) ? produtosDimRaw : [];
   const baseDimProdutos = normalizarDimProdutos(produtosDimRows);
-  const dimProdutosVarejo = baseDimProdutos.map(row => ({ ...row, scenario: SEGMENT_SCENARIO_DEFAULT }));
-
-  const dimProdutosEmpresas = dimProdutosVarejo.map(row => ({ ...row, scenario: "empresas" }));
-
-  SEGMENT_DIMENSION_MAP.clear();
-  SEGMENT_DIMENSION_MAP.set(SEGMENT_SCENARIO_DEFAULT, dimProdutosVarejo);
-  SEGMENT_DIMENSION_MAP.set("empresas", dimProdutosEmpresas);
-  const defaultDim = dimProdutosVarejo.slice();
-  const empresasDim = dimProdutosEmpresas.slice();
-
-  const dimensionAliases = [
-    { key: SEGMENT_SCENARIO_DEFAULT, value: defaultDim },
-    { key: "default", value: defaultDim },
-    { key: "todos", value: defaultDim },
-    { key: "empresas", value: empresasDim }
-  ];
-
-  const globalMaps = [];
+  DIM_PRODUTOS = baseDimProdutos.map(row => ({ ...row }));
+  rebuildCardCatalogFromDimension(DIM_PRODUTOS);
+  montarCatalogoDeProdutos(DIM_PRODUTOS);
   if (typeof window !== "undefined") {
-    globalMaps.push(window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap);
-  } else {
-    globalMaps.push(segMap, dirMap, regMap, ageMap, agMap);
+    [window.segMap, window.dirMap, window.regMap, window.ageMap, window.agMap]
+      .filter(map => map instanceof Map)
+      .forEach(map => map.clear());
   }
-
-  globalMaps.forEach(map => {
-    if (!(map instanceof Map)) return;
-    map.clear();
-    dimensionAliases.forEach(({ key, value }) => {
-      map.set(key, value);
-    });
-  });
   rebuildGlobalDimensionAliasIndex();
-  applySegmentDimension(CURRENT_SEGMENT_SCENARIO);
   montarHierarquiaMesu(mesuRows);
 
   FACT_REALIZADOS = normalizarLinhasFatoRealizados(Array.isArray(realizadosRaw) ? realizadosRaw : []);
@@ -4414,7 +4152,7 @@ function processBaseDataSources({
     dimGerentesGestao: gerentesGestaoDim,
     dimGerentes: gerentesDim,
     dimProdutos: DIM_PRODUTOS,
-    dimProdutosPorSegmento: Object.fromEntries(Array.from(SEGMENT_DIMENSION_MAP.entries()).map(([key, rows]) => [key, rows])),
+    dimProdutosPorSegmento: { default: DIM_PRODUTOS },
     status: STATUS_INDICADORES_DATA,
     dados: FACT_REALIZADOS,
     realizados: FACT_REALIZADOS,
@@ -4453,12 +4191,12 @@ async function loadBaseData(){
           leadsRaw: payload?.leads || [],
           detalhesRaw: payload?.detalhes || [],
           historicoRaw: payload?.historico || [],
-          dimSegmentosRaw: payload?.dimSegmentos || payload?.segmentosDim || [],
-          dimDiretoriasRaw: payload?.dimDiretorias || payload?.diretoriasDim || [],
-          dimRegionaisRaw: payload?.dimRegionais || payload?.regionaisDim || [],
-          dimAgenciasRaw: payload?.dimAgencias || payload?.agenciasDim || [],
-          dimGerentesGestaoRaw: payload?.dimGerentesGestao || payload?.gerentesGestaoDim || [],
-          dimGerentesRaw: payload?.dimGerentes || payload?.gerentesDim || [],
+          dimSegmentosRaw: payload?.dimSegmentos || payload?.segmentosDim || payload?.segmentos || [],
+          dimDiretoriasRaw: payload?.dimDiretorias || payload?.diretoriasDim || payload?.diretorias || [],
+          dimRegionaisRaw: payload?.dimRegionais || payload?.regionaisDim || payload?.regionais || [],
+          dimAgenciasRaw: payload?.dimAgencias || payload?.agenciasDim || payload?.agencias || [],
+          dimGerentesGestaoRaw: payload?.dimGerentesGestao || payload?.gerentesGestaoDim || payload?.ggestoes || [],
+          dimGerentesRaw: payload?.dimGerentes || payload?.gerentesDim || payload?.gerentes || [],
         });
       }
 
@@ -5508,12 +5246,6 @@ const CAMPAIGN_SPRINTS = [
             { id: "minimo", label: "90% em todos", values: { linhas: 90, cash: 90, conquista: 90 } },
             { id: "meta", label: "Meta (100%)", values: { linhas: 100, cash: 100, conquista: 100 } },
             { id: "destaque", label: "Stretch (120%)", values: { linhas: 120, cash: 120, conquista: 120 } }
-          ],
-          scenarios: [
-            { id: "full", label: "100% em todas as linhas", values: { linhas: 100, cash: 100, conquista: 100 }, note: "Parabéns" },
-            { id: "linhas120", label: "Linhas 120%, Cash 100%, Conquista 90%", values: { linhas: 120, cash: 100, conquista: 90 }, note: "Elegível" },
-            { id: "cash115", label: "Linhas 95%, Cash 115%, Conquista 130%", values: { linhas: 95, cash: 115, conquista: 130 }, note: "Elegível" },
-            { id: "ajuste", label: "Linhas 85%, Cash 80%, Conquista 110%", values: { linhas: 85, cash: 80, conquista: 110 }, note: "Ajustar" }
           ]
         },
         {
@@ -5534,12 +5266,6 @@ const CAMPAIGN_SPRINTS = [
             { id: "minimo", label: "90% em todos", values: { linhas: 90, cash: 90, conquista: 90 } },
             { id: "meta", label: "Meta (100%)", values: { linhas: 100, cash: 100, conquista: 100 } },
             { id: "stretch", label: "Stretch (120%)", values: { linhas: 120, cash: 120, conquista: 120 } }
-          ],
-          scenarios: [
-            { id: "volume", label: "Linhas 130%, Cash 115%, Conquista 95%", values: { linhas: 130, cash: 115, conquista: 95 }, note: "Parabéns" },
-            { id: "equilibrio", label: "Linhas 110%, Cash 105%, Conquista 100%", values: { linhas: 110, cash: 105, conquista: 100 }, note: "Elegível" },
-            { id: "alerta", label: "Linhas 92%, Cash 88%, Conquista 96%", values: { linhas: 92, cash: 88, conquista: 96 }, note: "Ajustar" },
-            { id: "critico", label: "Linhas 80%, Cash 78%, Conquista 85%", values: { linhas: 80, cash: 78, conquista: 85 }, note: "Não elegível" }
           ]
         }
       ]
@@ -6352,6 +6078,81 @@ function makeRandomForMetric(metric){
 /* ===== Aqui eu centralizo o carregamento de dados (API ou CSV local) ===== */
 // Aqui eu faço uma chamada GET simples contra a API com tratamento básico de erro.
 async function apiGet(path, params){
+  const fetchJson = async (targetUrl) => {
+    let response;
+    try {
+      response = await fetch(targetUrl, { cache: "no-store" });
+    } catch (err) {
+      const error = new Error("Não foi possível contactar a API PHP em config/api/index.php.");
+      error.cause = err;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    let text;
+    try {
+      text = await response.text();
+    } catch (err) {
+      const error = new Error("Falha ao ler a resposta da API PHP.");
+      error.cause = err;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    let json;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch (err) {
+      const error = new Error("A API PHP retornou um JSON inválido.");
+      error.cause = err;
+      error.responseText = text;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    if (!response.ok) {
+      const message = (json && typeof json === "object" && json.error)
+        ? String(json.error)
+        : `Falha ao carregar dados (HTTP ${response.status})`;
+      const error = new Error(message);
+      error.code = "HTTP_ERROR";
+      error.status = response.status;
+      error.payload = json;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    if (json && typeof json === "object" && json.error) {
+      const error = new Error(String(json.error));
+      error.code = "API_ERROR";
+      error.payload = json;
+      error.url = targetUrl;
+      throw error;
+    }
+
+    return json;
+  };
+
+  if ((params === undefined || params === null) && typeof path === "string") {
+    const trimmed = path.trim();
+    if (trimmed) {
+      const lower = trimmed.toLowerCase();
+      const isAbsolute = lower.startsWith("http://") || lower.startsWith("https://");
+      const isRelativePhp = trimmed.startsWith(API_BASE) || trimmed.startsWith("config/") || trimmed.startsWith("./") || trimmed.startsWith("../");
+      const hasQuery = trimmed.includes("?");
+      const isQueryOnly = trimmed.startsWith("?");
+      if (isAbsolute) {
+        return fetchJson(trimmed);
+      }
+      if (isQueryOnly) {
+        return fetchJson(`${API_BASE}${trimmed}`);
+      }
+      if (hasQuery || isRelativePhp) {
+        return fetchJson(trimmed);
+      }
+    }
+  }
+
   let baseUrl;
   try {
     baseUrl = resolveApiBaseUrl();
@@ -6361,54 +6162,62 @@ async function apiGet(path, params){
     throw error;
   }
   const { url } = prepareApiUrl(baseUrl, path, params);
+  return fetchJson(url.toString());
+}
 
-  let response;
-  try {
-    response = await fetch(url, { cache: "no-store" });
-  } catch (err) {
-    const error = new Error("Não foi possível contactar a API PHP em config/api/index.php.");
-    error.cause = err;
-    throw error;
-  }
+function setOptions(selectEl, items, emptyLabel='Todos') {
+  if (!selectEl) return;
+  const opts = (Array.isArray(items) ? items : [])
+    .map(it => {
+      const id = String(it.id ?? it.value ?? it.funcional ?? '').trim();
+      const label = String(it.label ?? it.nome ?? id).trim();
+      return id && label ? { value: id, label } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'));
 
-  let text;
-  try {
-    text = await response.text();
-  } catch (err) {
-    const error = new Error("Falha ao ler a resposta da API PHP.");
-    error.cause = err;
-    throw error;
-  }
+  const prev = selectEl.value;
+  selectEl.innerHTML = '';
+  selectEl.appendChild(new Option(emptyLabel, ''));
+  for (const o of opts) selectEl.appendChild(new Option(o.label, o.value));
+  if (opts.some(o => o.value === prev)) selectEl.value = prev;
+}
 
-  let json;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (err) {
-    const error = new Error("A API PHP retornou um JSON inválido.");
-    error.cause = err;
-    error.responseText = text;
-    throw error;
-  }
+function refreshSelectSearchOptions(selectEl, aliasFactory) {
+  if (!selectEl || selectEl.dataset.search !== 'true') return;
+  ensureSelectSearch(selectEl);
+  const entries = Array.from(selectEl.options || []).map(opt => {
+    const value = String(opt.value ?? '').trim();
+    const label = String(opt.textContent ?? opt.label ?? value).trim();
+    if (!value && !label) return null;
+    const aliases = typeof aliasFactory === 'function'
+      ? aliasFactory(value, label)
+      : [label, value].filter(Boolean);
+    return { value, label: label || value, aliases: Array.isArray(aliases) ? aliases.filter(Boolean) : [] };
+  }).filter(Boolean);
+  storeSelectSearchOptions(selectEl, entries);
+  syncSelectSearchInput(selectEl);
+}
 
-  if (!response.ok) {
-    const message = (json && typeof json === "object" && json.error)
-      ? String(json.error)
-      : `Falha ao carregar dados (HTTP ${response.status})`;
-    const error = new Error(message);
-    error.code = "HTTP_ERROR";
-    error.status = response.status;
-    error.payload = json;
-    throw error;
-  }
+function resolveFamiliaSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
+}
 
-  if (json && typeof json === "object" && json.error) {
-    const error = new Error(String(json.error));
-    error.code = "API_ERROR";
-    error.payload = json;
-    throw error;
-  }
+function resolveIndicadorSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  const meta = INDICATOR_CARD_INDEX.get(value) || PRODUCT_INDEX.get(value) || {};
+  if (meta.nome) aliases.add(meta.nome);
+  if (meta.name) aliases.add(meta.name);
+  if (Array.isArray(meta.aliases)) meta.aliases.forEach(alias => aliases.add(alias));
+  const aliasSet = CARD_ALIAS_INDEX.get(value);
+  if (aliasSet instanceof Set) aliasSet.forEach(alias => aliases.add(alias));
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
+}
 
-  return json;
+function resolveSubindicadorSearchAliases(value, label) {
+  const aliases = new Set([value, label]);
+  return Array.from(aliases).map(item => limparTexto(item) || item).filter(Boolean);
 }
 
 // Aqui eu faço uma chamada POST simples contra a API para enviar JSON.
@@ -6509,6 +6318,309 @@ function prepareApiUrl(baseUrl, path, params){
 
   return { url: url.toString() };
 }
+
+const $segmento = document.getElementById('f-segmento');
+const $diretoria = document.getElementById('f-diretoria');
+const $regional  = document.getElementById('f-gerencia');
+const $agencia   = document.getElementById('f-agencia');
+const $gg        = document.getElementById('f-ggestao');
+const $gerente   = document.getElementById('f-gerente');
+const $familia   = document.getElementById('f-secao');
+const $indicador = document.getElementById('f-familia');
+const $subindicador = document.getElementById('f-produto');
+
+function toInt(value) {
+  const n = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function qs() {
+  const p = new URLSearchParams();
+  if ($segmento?.value)  p.set('segmento_id', $segmento.value);
+  if ($diretoria?.value) p.set('diretoria_id', $diretoria.value);
+  if ($regional?.value)  p.set('regional_id',  $regional.value);
+  if ($agencia?.value)   p.set('agencia_id',   $agencia.value);
+  if ($gg?.value)        p.set('gg_funcional', $gg.value);
+  const fid = toInt($familia?.value);
+  if (fid) p.set('familia_id', String(fid));
+  return p.toString();
+}
+
+function buildFiltrosUrl(nivel) {
+  const query = qs();
+  const base = `${API_BASE}?endpoint=filtros&nivel=${encodeURIComponent(nivel)}`;
+  return query ? `${base}&${query}` : base;
+}
+
+function buildIndicadoresUrl() {
+  const base = `${API_BASE}?endpoint=filtros&nivel=indicadores`;
+  const fid = toInt($familia?.value);
+  if (!fid) return base;
+  const fidValue = String(fid);
+  return `${base}&familia_id=${encodeURIComponent(fidValue)}`;
+}
+
+function buildSubindicadoresUrl(indicadorId) {
+  const base = `${API_BASE}?endpoint=filtros&nivel=subindicadores`;
+  const iid = toInt(indicadorId);
+  if (!iid) return base;
+  return `${base}&indicador_id=${encodeURIComponent(iid)}`;
+}
+
+function buildResumoParams() {
+  const params = new URLSearchParams();
+  if ($segmento?.value)  params.set('segmento_id', $segmento.value);
+  if ($diretoria?.value) params.set('diretoria_id', $diretoria.value);
+  if ($regional?.value)  params.set('regional_id', $regional.value);
+  if ($agencia?.value)   params.set('agencia_id', $agencia.value);
+  if ($gg?.value)        params.set('gg_funcional', $gg.value);
+  if ($gerente?.value)   params.set('gerente_funcional', $gerente.value);
+  const fid = toInt($familia?.value);
+  const iid = toInt($indicador?.value);
+  const sid = toInt($subindicador?.value);
+  if (fid) params.set('familia_id', String(fid));
+  if (iid) params.set('indicador_id', String(iid));
+  if (sid) params.set('subindicador_id', String(sid));
+  return params.toString();
+}
+
+async function fetchResumoKpiFromApi() {
+  const period = state?.period || getDefaultPeriodRange();
+  const startISO = period?.start || todayISO();
+  const endISO = period?.end || startISO;
+  const query = new URLSearchParams({ endpoint: 'resumo', data_ini: startISO, data_fim: endISO });
+  const filters = buildResumoParams();
+  if (filters) {
+    const filterParams = new URLSearchParams(filters);
+    filterParams.forEach((value, key) => {
+      if (value !== '') query.set(key, value);
+    });
+  }
+  return apiGet(`${API_BASE}?${query.toString()}`);
+}
+
+function parseResumoKpiPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { meta: 0, realizado: 0, updatedAt: null };
+  }
+  const kpi = payload.kpi && typeof payload.kpi === 'object' ? payload.kpi : {};
+  const meta = toNumber(kpi.meta_total ?? kpi.meta ?? 0);
+  const realizado = toNumber(kpi.realizado_total ?? kpi.realizado ?? 0);
+  const updatedAt = typeof payload.updated_at === 'string' ? payload.updated_at : null;
+  return { meta, realizado, updatedAt };
+}
+
+async function refreshResumoFromApi() {
+  try {
+    const raw = await fetchResumoKpiFromApi();
+    state.apiResumo = parseResumoKpiPayload(raw);
+    return state.apiResumo;
+  } catch (error) {
+    console.warn('Falha ao carregar resumo da API.', error);
+    if (!state.apiResumo) state.apiResumo = null;
+    return state.apiResumo;
+  }
+}
+
+async function bootstrapFiltros() {
+  try {
+    const data = await apiGet(`${API_BASE}?endpoint=bootstrap`);
+    setOptions($segmento,  data?.segmentos,  'Todos');
+    setOptions($diretoria, data?.diretorias, 'Todas');
+    setOptions($regional,  data?.regionais,  'Todas');
+    setOptions($agencia,   data?.agencias,   'Todas');
+    setOptions($gg,        data?.ggestoes,   'Todos');
+    setOptions($gerente,   data?.gerentes,   'Todos');
+    setOptions($familia,   data?.familias,   'Todas');
+    setOptions($indicador, data?.indicadores, 'Todos');
+    setOptions($subindicador, data?.subindicadores ?? [], 'Todos');
+    if ($indicador) {
+      const hasIndicadores = Array.isArray(data?.indicadores) && data.indicadores.length > 0;
+      $indicador.disabled = !hasIndicadores;
+    }
+    if ($subindicador) {
+      const hasSubs = Array.isArray(data?.subindicadores) && data.subindicadores.length > 0;
+      $subindicador.disabled = !hasSubs;
+    }
+    if ($familia) {
+      $familia.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($familia, resolveFamiliaSearchAliases);
+    }
+    if ($indicador) {
+      $indicador.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
+    }
+    if ($subindicador) {
+      $subindicador.dataset.apiManaged = '1';
+      refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+    }
+  } catch (error) {
+    console.error('Falha ao carregar filtros iniciais.', error);
+  }
+}
+
+function ensureBootstrapFiltros() {
+  if (typeof document === 'undefined') return;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { void bootstrapFiltros(); });
+  } else {
+    void bootstrapFiltros();
+  }
+}
+
+ensureBootstrapFiltros();
+
+function handleApiError(context, error) {
+  console.error(context, error);
+}
+
+$segmento?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar diretorias.';
+  setOptions($diretoria, [], 'Todas');
+  setOptions($regional,  [], 'Todas');
+  setOptions($agencia,   [], 'Todas');
+  setOptions($gg,        [], 'Todos');
+  setOptions($gerente,   [], 'Todos');
+  try {
+    const d = await apiGet(buildFiltrosUrl('diretorias'));
+    setOptions($diretoria, d?.diretorias, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$familia?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar indicadores.';
+  const triggeredProgrammatically = $familia?.dataset?.updating === '1';
+  const keepIndicatorValue = triggeredProgrammatically && $indicador ? $indicador.value : '';
+  if ($indicador) $indicador.disabled = true;
+  if ($subindicador) $subindicador.disabled = true;
+  setOptions($indicador, [], 'Todos');
+  setOptions($subindicador, [], 'Todos');
+  refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
+  refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+  try {
+    const res = await apiGet(buildIndicadoresUrl());
+    const indicadores = Array.isArray(res?.indicadores) ? res.indicadores : [];
+    setOptions($indicador, indicadores, 'Todos');
+    if ($indicador) {
+      $indicador.disabled = indicadores.length === 0;
+      if ($indicador.dataset.search === 'true') syncSelectSearchInput($indicador);
+    }
+    if (triggeredProgrammatically && keepIndicatorValue) {
+      const options = Array.from($indicador?.options ?? []);
+      const hasPrevious = options.some(opt => String(opt.value) === String(keepIndicatorValue));
+      if (hasPrevious) {
+        $indicador.value = keepIndicatorValue;
+        if ($indicador.dataset.search === 'true') syncSelectSearchInput($indicador);
+      }
+    }
+    refreshSelectSearchOptions($indicador, resolveIndicadorSearchAliases);
+  } catch (error) {
+    handleApiError(context, error);
+  } finally {
+    if (!triggeredProgrammatically) {
+      if ($subindicador) {
+        $subindicador.disabled = true;
+        refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+      }
+    }
+  }
+});
+
+$diretoria?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar regionais.';
+  setOptions($regional, [], 'Todas');
+  setOptions($agencia,  [], 'Todas');
+  setOptions($gg,       [], 'Todos');
+  setOptions($gerente,  [], 'Todos');
+  try {
+    const r = await apiGet(buildFiltrosUrl('regionais'));
+    setOptions($regional, r?.regionais, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$regional?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar agências.';
+  setOptions($agencia, [], 'Todas');
+  setOptions($gg,      [], 'Todos');
+  setOptions($gerente, [], 'Todos');
+  try {
+    const a = await apiGet(buildFiltrosUrl('agencias'));
+    setOptions($agencia, a?.agencias, 'Todas');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$agencia?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar gerentes de gestão.';
+  setOptions($gg,      [], 'Todos');
+  setOptions($gerente, [], 'Todos');
+  try {
+    const g = await apiGet(buildFiltrosUrl('ggestoes'));
+    setOptions($gg, g?.ggestoes, 'Todos');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$gg?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar gerentes.';
+  setOptions($gerente, [], 'Todos');
+  try {
+    const ge = await apiGet(buildFiltrosUrl('gerentes'));
+    setOptions($gerente, ge?.gerentes, 'Todos');
+  } catch (error) {
+    handleApiError(context, error);
+  }
+});
+
+$indicador?.addEventListener('change', async () => {
+  const context = 'Falha ao atualizar subindicadores.';
+  const rawId = $indicador?.value || '';
+  setOptions($subindicador, [], 'Todos');
+  refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+  const iid = toInt(rawId);
+  if ($subindicador) $subindicador.disabled = true;
+  if (!iid) {
+    return;
+  }
+  let resetFamilia = false;
+  try {
+    const iidValue = String(iid);
+    const info = await apiGet(`${API_BASE}?endpoint=filtros&nivel=produto_info&indicador_id=${encodeURIComponent(iidValue)}`);
+    if (info?.familia_id && $familia) {
+      const desired = String(info.familia_id);
+      if (String($familia.value || '') !== desired) {
+        $familia.dataset.updating = '1';
+        resetFamilia = true;
+        $familia.value = desired;
+        if ($familia.dataset.search === 'true') syncSelectSearchInput($familia);
+        $familia.dispatchEvent(new Event('change'));
+      }
+    }
+    let subOptions = [];
+    if (info?.has_sub) {
+      const subs = await apiGet(buildSubindicadoresUrl(iidValue));
+      subOptions = Array.isArray(subs?.subindicadores) ? subs.subindicadores : [];
+    }
+    setOptions($subindicador, subOptions, 'Todos');
+    if ($subindicador) {
+      $subindicador.disabled = subOptions.length === 0;
+      if ($subindicador.dataset.search === 'true') syncSelectSearchInput($subindicador);
+    }
+    refreshSelectSearchOptions($subindicador, resolveSubindicadorSearchAliases);
+  } catch (error) {
+    handleApiError(context, error);
+  } finally {
+    if (resetFamilia) {
+      delete $familia.dataset.updating;
+    }
+  }
+});
 // Aqui eu faço todo o processo de montar os dados consolidados (fatos + metas + campanhas) usados nas telas.
 async function getData(){
   const period = state.period || getDefaultPeriodRange();
@@ -7145,6 +7257,9 @@ const state = {
   _rankingRaw:[],
   facts:{ dados:[], campanhas:[], variavel:[], historico:[] },
   dashboard:{ sections:[], summary:{} },
+  apiResumo:null,
+  classicRows:null,
+  classicKey:"",
   dashboardVisibleSections:[],
   activeView:"cards",
   resumoMode: readLocalStorageItem(RESUMO_MODE_STORAGE_KEY) === "legacy" ? "legacy" : "cards",
@@ -7689,6 +7804,7 @@ async function clearFilters() {
   }
 
   await withSpinner(async () => {
+    await refreshResumoFromApi();
     applyFiltersAndRender();
     renderAppliedFilters();
     renderCampanhasView();
@@ -8006,6 +8122,7 @@ function ensureStatusFilterInAdvanced() {
     host.appendChild(wrap);
     $("#f-status-kpi").addEventListener("change", async () => {
       await withSpinner(async () => {
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -8673,6 +8790,7 @@ function renderAppliedFilters() {
     chip.querySelector("button").addEventListener("click", async () => {
       await withSpinner(async () => {
         resetFn?.();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -8893,7 +9011,6 @@ function buildHierarchyFallbackRow(fieldKey, item) {
   if (full.hidden != null) row.hidden = Boolean(full.hidden);
   if (Number.isFinite(full.order)) row.order = Number(full.order);
   if (full.slug) row.slug = full.slug;
-  if (full.scenario) row.scenario = full.scenario;
 
   return row;
 }
@@ -8961,7 +9078,6 @@ function getHierarchyRows(){
         segmentoHidden: segMeta.hidden,
         segmentoAliases: Array.isArray(segMeta.aliases) ? [...segMeta.aliases] : undefined,
         segmentoSlug: segMeta.slug,
-        segmentoScenario: segMeta.scenario,
         diretoriaId: dirMeta.id || dirMeta.nome || "",
         diretoriaNome: dirMeta.nome || dirMeta.id || dirMeta.segmento || "",
         regionalId: gerMeta.id || gerMeta.nome || "",
@@ -9089,7 +9205,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     }
     if (meta.hidden != null && entry.hidden == null) entry.hidden = Boolean(meta.hidden);
     if (meta.slug && !entry.slug) entry.slug = meta.slug;
-    if (meta.scenario && !entry.scenario) entry.scenario = meta.scenario;
     if (Number.isFinite(meta.order)) {
       const order = Number(meta.order);
       if (!Number.isFinite(entry.order) || order < entry.order) entry.order = order;
@@ -9130,7 +9245,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     }
     if (meta.hidden != null) entry.hidden = Boolean(meta.hidden);
     if (meta.slug) entry.slug = meta.slug;
-    if (meta.scenario) entry.scenario = meta.scenario;
     if (Number.isFinite(meta.order)) entry.order = Number(meta.order);
     else if (safeValue && orderById.has(safeValue)) entry.order = orderById.get(safeValue);
     labelIndex.set(key, entry);
@@ -9199,8 +9313,7 @@ function buildHierarchyOptions(fieldKey, selection, rows){
           order: row.segmentoOrder ?? row.order,
           hidden: row.segmentoHidden ?? row.hidden,
           aliases: row.segmentoAliases ?? row.aliases,
-          slug: row.segmentoSlug ?? row.slug,
-          scenario: row.segmentoScenario ?? row.scenario
+          slug: row.segmentoSlug ?? row.slug
         }
       : {};
     if (aliasCandidates.length) {
@@ -9215,7 +9328,6 @@ function buildHierarchyOptions(fieldKey, selection, rows){
     if (row.hidden != null && meta.hidden == null) meta.hidden = Boolean(row.hidden);
     if (Number.isFinite(row.order) && !Number.isFinite(meta.order)) meta.order = Number(row.order);
     if (row.slug && !meta.slug) meta.slug = row.slug;
-    if (row.scenario && !meta.scenario) meta.scenario = row.scenario;
     register(cleanValue || rawValue, displayLabel || cleanLabel || cleanValue, meta);
   });
 
@@ -9542,6 +9654,8 @@ function getFilterValues() {
     secaoId:   val("#f-secao"),
     familiaId: val("#f-familia"),
     produtoId: val("#f-produto"),
+    indicadorId: val("#f-familia"),
+    subindicadorId: val("#f-produto"),
     status:    statusKey || "todos",
     statusCodigo,
     statusId,
@@ -10442,88 +10556,97 @@ function initCombos() {
   const familiaSelect = $("#f-familia");
   const secaoSelect = $("#f-secao");
   const produtoSelect = $("#f-produto");
-  const buildIndicatorOptions = (secaoId) => {
-    const base = [{ value: "Todas", label: "Todos", aliases: ["Todos", "Todas"] }];
-    const filtroSecao = secaoId && secaoId !== "Todas" ? secaoId : "";
-    const added = new Set();
-    const indicadores = [];
-    const consider = (prod) => {
-      if (!prod || !prod.id || added.has(prod.id)) return;
-      if (filtroSecao && prod.secaoId && prod.secaoId !== filtroSecao) return;
-      const cardMeta = INDICATOR_CARD_INDEX.get(prod.id) || PRODUCT_INDEX.get(prod.id) || {};
-      const familiaMeta = PRODUTO_TO_FAMILIA.get(prod.id) || {};
-      const prodSecao = cardMeta.sectionId || familiaMeta.secaoId || prod.secaoId || "";
-      if (filtroSecao && prodSecao && prodSecao !== filtroSecao) return;
-      const nome = cardMeta.nome || cardMeta.name || prod.nome || prod.id;
-      const aliasList = new Set([prod.id, nome, cardMeta.nome, cardMeta.name]);
-      if (Array.isArray(cardMeta.aliases)) {
-        cardMeta.aliases.forEach(alias => aliasList.add(limparTexto(alias)));
+  if (familiaSelect && familiaSelect.dataset.apiManaged === '1') {
+    ensureSelectSearch(familiaSelect);
+    refreshSelectSearchOptions(familiaSelect, resolveIndicadorSearchAliases);
+    if (produtoSelect) {
+      ensureSelectSearch(produtoSelect);
+      refreshSelectSearchOptions(produtoSelect, resolveSubindicadorSearchAliases);
+    }
+  } else {
+    const buildIndicatorOptions = (secaoId) => {
+      const base = [{ value: "Todas", label: "Todos", aliases: ["Todos", "Todas"] }];
+      const filtroSecao = secaoId && secaoId !== "Todas" ? secaoId : "";
+      const added = new Set();
+      const indicadores = [];
+      const consider = (prod) => {
+        if (!prod || !prod.id || added.has(prod.id)) return;
+        if (filtroSecao && prod.secaoId && prod.secaoId !== filtroSecao) return;
+        const cardMeta = INDICATOR_CARD_INDEX.get(prod.id) || PRODUCT_INDEX.get(prod.id) || {};
+        const familiaMeta = PRODUTO_TO_FAMILIA.get(prod.id) || {};
+        const prodSecao = cardMeta.sectionId || familiaMeta.secaoId || prod.secaoId || "";
+        if (filtroSecao && prodSecao && prodSecao !== filtroSecao) return;
+        const nome = cardMeta.nome || cardMeta.name || prod.nome || prod.id;
+        const aliasList = new Set([prod.id, nome, cardMeta.nome, cardMeta.name]);
+        if (Array.isArray(cardMeta.aliases)) {
+          cardMeta.aliases.forEach(alias => aliasList.add(limparTexto(alias)));
+        }
+        const aliasSet = CARD_ALIAS_INDEX.get(prod.id);
+        if (aliasSet instanceof Set) aliasSet.forEach(item => aliasList.add(item));
+        indicadores.push({ value: prod.id, label: nome || prod.id, aliases: Array.from(aliasList).filter(Boolean) });
+        added.add(prod.id);
+      };
+      if (filtroSecao) {
+        (PRODUTOS_BY_FAMILIA.get(filtroSecao) || []).forEach(consider);
+      } else {
+        PRODUTOS_BY_FAMILIA.forEach(list => list.forEach(consider));
       }
-      const aliasSet = CARD_ALIAS_INDEX.get(prod.id);
-      if (aliasSet instanceof Set) aliasSet.forEach(item => aliasList.add(item));
-      indicadores.push({ value: prod.id, label: nome || prod.id, aliases: Array.from(aliasList).filter(Boolean) });
-      added.add(prod.id);
+      indicadores.sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt-BR", { sensitivity: "base" }));
+      return base.concat(indicadores);
     };
-    if (filtroSecao) {
-      (PRODUTOS_BY_FAMILIA.get(filtroSecao) || []).forEach(consider);
-    } else {
-      PRODUTOS_BY_FAMILIA.forEach(list => list.forEach(consider));
+
+    const buildSubIndicadorOptions = (indicadorId) => {
+      const base = [{ value: "Todos", label: "Todos", aliases: ["Todos", "Todas"] }];
+      const resolved = resolverIndicadorPorAlias(indicadorId) || limparTexto(indicadorId);
+      if (!resolved || resolved === "Todas" || resolved === "Todos") return base;
+      const entries = getFlatSubIndicatorOptions(resolved);
+      if (!entries.length) return base;
+      return base.concat(entries);
+    };
+
+    const applySubIndicadorOptions = (preserveValue = true) => {
+      if (!produtoSelect) return;
+      const indicadorVal = familiaSelect ? familiaSelect.value : "Todas";
+      const previous = preserveValue ? produtoSelect.value : "Todos";
+      const options = buildSubIndicadorOptions(indicadorVal);
+      fill("#f-produto", options);
+      const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todos";
+      if (options.some(opt => opt.value === desired)) {
+        produtoSelect.value = desired;
+      }
+      produtoSelect.disabled = options.length <= 1;
+      if (produtoSelect.dataset.search === "true") syncSelectSearchInput(produtoSelect);
+    };
+
+    const applyIndicatorOptions = (preserveValue = true) => {
+      if (!familiaSelect) return;
+      const secVal = secaoSelect ? secaoSelect.value : "Todas";
+      const previous = preserveValue ? familiaSelect.value : "Todas";
+      const options = buildIndicatorOptions(secVal);
+      fill("#f-familia", options);
+      const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todas";
+      if (options.some(opt => opt.value === desired)) {
+        familiaSelect.value = desired;
+      }
+      if (familiaSelect.dataset.search === "true") syncSelectSearchInput(familiaSelect);
+      applySubIndicadorOptions(preserveValue);
+    };
+
+    applyIndicatorOptions(true);
+
+    if (familiaSelect && !familiaSelect.dataset.bound) {
+      familiaSelect.dataset.bound = "1";
+      familiaSelect.addEventListener("change", () => {
+        applySubIndicadorOptions(false);
+      });
     }
-    indicadores.sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt-BR", { sensitivity: "base" }));
-    return base.concat(indicadores);
-  };
 
-  const buildSubIndicadorOptions = (indicadorId) => {
-    const base = [{ value: "Todos", label: "Todos", aliases: ["Todos", "Todas"] }];
-    const resolved = resolverIndicadorPorAlias(indicadorId) || limparTexto(indicadorId);
-    if (!resolved || resolved === "Todas" || resolved === "Todos") return base;
-    const entries = getFlatSubIndicatorOptions(resolved);
-    if (!entries.length) return base;
-    return base.concat(entries);
-  };
-
-  const applySubIndicadorOptions = (preserveValue = true) => {
-    if (!produtoSelect) return;
-    const indicadorVal = familiaSelect ? familiaSelect.value : "Todas";
-    const previous = preserveValue ? produtoSelect.value : "Todos";
-    const options = buildSubIndicadorOptions(indicadorVal);
-    fill("#f-produto", options);
-    const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todos";
-    if (options.some(opt => opt.value === desired)) {
-      produtoSelect.value = desired;
+    if (secaoSelect && !secaoSelect.dataset.bound) {
+      secaoSelect.dataset.bound = "1";
+      secaoSelect.addEventListener("change", () => {
+        applyIndicatorOptions(true);
+      });
     }
-    produtoSelect.disabled = options.length <= 1;
-    if (produtoSelect.dataset.search === "true") syncSelectSearchInput(produtoSelect);
-  };
-
-  const applyIndicatorOptions = (preserveValue = true) => {
-    if (!familiaSelect) return;
-    const secVal = secaoSelect ? secaoSelect.value : "Todas";
-    const previous = preserveValue ? familiaSelect.value : "Todas";
-    const options = buildIndicatorOptions(secVal);
-    fill("#f-familia", options);
-    const desired = preserveValue && options.some(opt => opt.value === previous) ? previous : "Todas";
-    if (options.some(opt => opt.value === desired)) {
-      familiaSelect.value = desired;
-    }
-    if (familiaSelect.dataset.search === "true") syncSelectSearchInput(familiaSelect);
-    applySubIndicadorOptions(preserveValue);
-  };
-
-  applyIndicatorOptions(true);
-
-  if (familiaSelect && !familiaSelect.dataset.bound) {
-    familiaSelect.dataset.bound = "1";
-    familiaSelect.addEventListener("change", () => {
-      applySubIndicadorOptions(false);
-    });
-  }
-
-  if (secaoSelect && !secaoSelect.dataset.bound) {
-    secaoSelect.dataset.bound = "1";
-    secaoSelect.addEventListener("change", () => {
-      applyIndicatorOptions(true);
-    });
   }
 
   updateStatusFilterOptions();
@@ -10549,6 +10672,7 @@ function bindEvents() {
   $("#btn-consultar")?.addEventListener("click", async () => {
     await withSpinner(async () => {
       autoSnapViewToFilters();
+      await refreshResumoFromApi();
       applyFiltersAndRender();
       renderAppliedFilters();
       renderCampanhasView();
@@ -10583,6 +10707,7 @@ function bindEvents() {
     $(sel)?.addEventListener("change", async () => {
       await withSpinner(async () => {
         autoSnapViewToFilters();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -10600,6 +10725,7 @@ function bindEvents() {
       syncPeriodFromAccumulatedView(nextView);
       await withSpinner(async () => {
         autoSnapViewToFilters();
+        await refreshResumoFromApi();
         applyFiltersAndRender();
         renderAppliedFilters();
         renderCampanhasView();
@@ -11430,6 +11556,279 @@ function renderResumoKPI(summary, context = {}) {
 
   triggerBarAnimation(kpi.querySelectorAll('.hitbar'), shouldAnimateResumo);
   if (resumoAnim) resumoAnim.kpiKey = nextResumoKey;
+}
+
+function collectClassicFilters() {
+  const filters = {};
+  const add = (key, value) => {
+    const normalized = valOrEmpty(value);
+    if (normalized) filters[key] = normalized;
+  };
+  add('segmento_id', $segmento?.value);
+  add('diretoria_id', $diretoria?.value);
+  add('regional_id', $regional?.value);
+  add('agencia_id', $agencia?.value);
+  add('gg_funcional', $gg?.value);
+  add('gerente_funcional', $gerente?.value);
+  const fid = toInt($familia?.value);
+  const iid = toInt($indicador?.value);
+  const sid = toInt($subindicador?.value);
+  if (fid) filters.familia_id = String(fid);
+  if (iid) filters.indicador_id = String(iid);
+  if (sid) filters.subindicador_id = String(sid);
+  return filters;
+}
+
+function buildClassicQueryConfig() {
+  const period = state?.period || getDefaultPeriodRange();
+  const startISO = period?.start || todayISO();
+  const endISO = period?.end || startISO;
+  const filters = collectClassicFilters();
+  const keyObj = { data_ini: startISO, data_fim: endISO };
+  const queryObj = { endpoint: 'tabela_classica', data_ini: startISO, data_fim: endISO };
+  Object.entries(filters).forEach(([key, value]) => {
+    const normalized = valOrEmpty(value);
+    keyObj[key] = normalized || null;
+    if (normalized) {
+      queryObj[key] = normalized;
+    }
+  });
+  return { url: `${API_BASE}?${toQuery(queryObj)}`, cacheKey: JSON.stringify(keyObj) };
+}
+
+function formatClassicValue(value) {
+  const num = Number.isFinite(value) ? value : toNumber(value);
+  return fmtBRL.format(num || 0);
+}
+
+function buildClassicTree(rows = []) {
+  const families = [];
+  const familyMap = new Map();
+
+  const ensureFamily = (id) => {
+    const key = id != null ? `fam-${id}` : `fam-auto-${familyMap.size}`;
+    if (!familyMap.has(key)) {
+      const fam = {
+        id: id != null ? id : null,
+        key,
+        uid: `fam-${familyMap.size}`,
+        label: '',
+        meta: 0,
+        realizado: 0,
+        indicators: [],
+        indicatorMap: new Map()
+      };
+      familyMap.set(key, fam);
+      families.push(fam);
+    }
+    return familyMap.get(key);
+  };
+
+  const ensureIndicator = (fam, id) => {
+    const map = fam.indicatorMap;
+    const key = id != null ? `ind-${id}` : `ind-auto-${map.size}`;
+    if (!map.has(key)) {
+      const indicator = {
+        id: id != null ? id : null,
+        key,
+        uid: `${fam.uid}-ind-${map.size}`,
+        label: '',
+        meta: 0,
+        realizado: 0,
+        subs: []
+      };
+      map.set(key, indicator);
+      fam.indicators.push(indicator);
+    }
+    return map.get(key);
+  };
+
+  rows.forEach(row => {
+    if (!row) return;
+    const fam = ensureFamily(row.id_familia ?? null);
+    if (row.nivel === 'familia') {
+      if (row.label) fam.label = row.label;
+      if (row.meta != null) fam.meta = toNumber(row.meta);
+      if (row.realizado != null) fam.realizado = toNumber(row.realizado);
+      return;
+    }
+    const indicator = ensureIndicator(fam, row.id_indicador ?? null);
+    if (row.nivel === 'indicador') {
+      if (row.label) indicator.label = row.label;
+      if (row.meta != null) indicator.meta = toNumber(row.meta);
+      if (row.realizado != null) indicator.realizado = toNumber(row.realizado);
+      return;
+    }
+    if (row.nivel === 'sub') {
+      indicator.subs.push({
+        id: row.id_subindicador != null ? row.id_subindicador : null,
+        label: row.label || '—',
+        meta: toNumber(row.meta),
+        realizado: toNumber(row.realizado),
+        uid: `${indicator.uid}-sub-${indicator.subs.length}`
+      });
+    }
+  });
+
+  families.forEach(fam => {
+    if (!fam.label) fam.label = fam.id != null ? `Família ${fam.id}` : 'Família';
+    fam.indicators.forEach(ind => {
+      if (!ind.label) ind.label = ind.id != null ? `Indicador ${ind.id}` : 'Indicador';
+    });
+  });
+
+  return families;
+}
+
+function buildClassicSectionHTML(fam) {
+  const safeLabel = escapeHTML(fam.label || 'Família');
+  const metaLabel = escapeHTML(formatClassicValue(fam.meta));
+  const realLabel = escapeHTML(formatClassicValue(fam.realizado));
+  const sectionId = escapeHTML(fam.uid || String(fam.id ?? 'familia'));
+
+  let bodyRows = '';
+  fam.indicators.forEach(ind => {
+    const hasSubs = Array.isArray(ind.subs) && ind.subs.length > 0;
+    const indicatorMeta = escapeHTML(formatClassicValue(ind.meta));
+    const indicatorReal = escapeHTML(formatClassicValue(ind.realizado));
+    const indicatorLabel = escapeHTML(ind.label || 'Indicador');
+    const indicatorId = escapeHTML(ind.uid || `${sectionId}-ind`);
+    const toggleHTML = hasSubs
+      ? `<button type="button" class="resumo-legacy__prod-toggle" aria-expanded="false"><i class="ti ti-chevron-right resumo-legacy__prod-toggle-icon" aria-hidden="true"></i><span class="resumo-legacy__prod-name">${indicatorLabel}</span></button>`
+      : `<span class="resumo-legacy__prod-name">${indicatorLabel}</span>`;
+
+    bodyRows += `
+<tr class="resumo-legacy__row resumo-legacy__row--indicator${hasSubs ? ' has-children' : ''}" data-indicador="${indicatorId}">
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod">${toggleHTML}</div></td>
+  <td class="resumo-legacy__col--meta">${indicatorMeta}</td>
+  <td class="resumo-legacy__col--real">${indicatorReal}</td>
+</tr>`;
+
+    if (hasSubs) {
+      ind.subs.forEach(sub => {
+        const subLabel = escapeHTML(sub.label || '—');
+        const subMeta = escapeHTML(formatClassicValue(sub.meta));
+        const subReal = escapeHTML(formatClassicValue(sub.realizado));
+        bodyRows += `
+<tr class="resumo-legacy__row resumo-legacy__child-row" data-parent="${indicatorId}" hidden>
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod resumo-legacy__prod--child"><span class="resumo-legacy__prod-name">${subLabel}</span></div></td>
+  <td class="resumo-legacy__col--meta">${subMeta}</td>
+  <td class="resumo-legacy__col--real">${subReal}</td>
+</tr>`;
+      });
+    }
+  });
+
+  if (!bodyRows) {
+    bodyRows = `
+<tr class="resumo-legacy__row">
+  <td class="resumo-legacy__col--prod" style="text-align:left"><div class="resumo-legacy__prod"><span class="resumo-legacy__prod-name">Sem indicadores</span></div></td>
+  <td class="resumo-legacy__col--meta">${metaLabel}</td>
+  <td class="resumo-legacy__col--real">${realLabel}</td>
+</tr>`;
+  }
+
+  return `
+<section class="resumo-legacy__section card card--legacy" data-familia="${sectionId}">
+  <header class="resumo-legacy__head">
+    <div class="resumo-legacy__heading">
+      <div class="resumo-legacy__title-row">
+        <span class="resumo-legacy__name">${safeLabel}</span>
+      </div>
+    </div>
+    <div class="resumo-legacy__stats">
+      <div class="resumo-legacy__stat"><span class="resumo-legacy__stat-label">Meta</span><strong class="resumo-legacy__stat-value">${metaLabel}</strong></div>
+      <div class="resumo-legacy__stat"><span class="resumo-legacy__stat-label">Realizado</span><strong class="resumo-legacy__stat-value">${realLabel}</strong></div>
+    </div>
+  </header>
+  <div class="resumo-legacy__table-wrapper">
+    <table class="resumo-legacy__table">
+      <thead>
+        <tr>
+          <th scope="col">Indicador / Subindicador</th>
+          <th scope="col" class="resumo-legacy__col--meta">Meta</th>
+          <th scope="col" class="resumo-legacy__col--real">Realizado</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${bodyRows}
+      </tbody>
+    </table>
+  </div>
+</section>`;
+}
+
+function renderClassicTable(rows = []) {
+  const host = $("#resumo-legacy");
+  if (!host) return;
+
+  if (!Array.isArray(rows) || !rows.length) {
+    host.innerHTML = `<div class="resumo-legacy__empty">Nenhum indicador encontrado para os filtros selecionados.</div>`;
+    return;
+  }
+
+  const families = buildClassicTree(rows);
+  if (!families.length) {
+    host.innerHTML = `<div class="resumo-legacy__empty">Nenhum indicador encontrado para os filtros selecionados.</div>`;
+    return;
+  }
+
+  const sections = families.map(buildClassicSectionHTML).join('\n');
+  host.innerHTML = sections;
+  wireClassicTableToggles(host);
+}
+
+function wireClassicTableToggles(host) {
+  host.querySelectorAll('.resumo-legacy__prod-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      const next = !expanded;
+      btn.setAttribute('aria-expanded', String(next));
+      const icon = btn.querySelector('.resumo-legacy__prod-toggle-icon');
+      if (icon) {
+        icon.className = `ti ${next ? 'ti-chevron-down' : 'ti-chevron-right'} resumo-legacy__prod-toggle-icon`;
+      }
+      const row = btn.closest('tr');
+      if (row) row.classList.toggle('is-expanded', next);
+      const indicatorId = row?.dataset.indicador;
+      if (!indicatorId) return;
+      host.querySelectorAll(`.resumo-legacy__child-row[data-parent="${indicatorId}"]`).forEach(child => {
+        if (next) {
+          child.removeAttribute('hidden');
+          child.classList.add('is-visible');
+        } else {
+          child.setAttribute('hidden', '');
+          child.classList.remove('is-visible');
+        }
+      });
+    });
+  });
+}
+
+function updateClassicViewFromApi(force = false) {
+  const host = $("#resumo-legacy");
+  if (!host) return;
+
+  const { url, cacheKey } = buildClassicQueryConfig();
+  if (!force && state.classicKey === cacheKey && Array.isArray(state.classicRows)) {
+    renderClassicTable(state.classicRows);
+    return;
+  }
+
+  state.classicKey = cacheKey;
+  host.innerHTML = `<div class="resumo-legacy__empty">Carregando visão clássica…</div>`;
+
+  fetchJSON(url)
+    .then(data => {
+      const rows = Array.isArray(data?.rows) ? data.rows : [];
+      state.classicRows = rows;
+      renderClassicTable(rows);
+    })
+    .catch(error => {
+      console.warn('Falha ao carregar visão clássica.', error);
+      state.classicRows = null;
+      host.innerHTML = `<div class="resumo-legacy__empty">Não foi possível carregar a visão clássica.</div>`;
+    });
 }
 
 function buildResumoLegacyAnnualDataset(sections = []) {
@@ -12597,6 +12996,9 @@ function setResumoMode(mode, { persist = true } = {}) {
     if (persist) writeLocalStorageItem(RESUMO_MODE_STORAGE_KEY, normalized);
   }
   applyResumoMode(normalized);
+  if (normalized === "legacy") {
+    updateClassicViewFromApi();
+  }
 }
 
 function setupResumoModeToggle() {
@@ -13510,6 +13912,7 @@ function renderFamilias(sections, summary){
   const sectionsForLegacy = legacySections.length ? legacySections : visibleSections;
   state.dashboardVisibleSections = sectionsForLegacy;
   renderResumoLegacyTable(sectionsForLegacy, summary, visibleSections);
+  updateClassicViewFromApi();
 
   applyResumoMode(state.resumoMode || "cards");
 
@@ -13518,7 +13921,7 @@ function renderFamilias(sections, summary){
     const badge = card.querySelector(".badge");
     if (badge && tip) bindBadgeTooltip(card);
 
-    card.addEventListener("click", (ev)=>{
+    card.addEventListener("click", async (ev)=>{
       if (ev.target?.classList.contains("badge")) return;
       const prodId = card.getAttribute("data-prod-id");
       const familiaSelect = $("#f-familia");
@@ -13540,6 +13943,7 @@ function renderFamilias(sections, summary){
       autoSnapViewToFilters();
       const tabDet = document.querySelector('.tab[data-view="table"]');
       if (tabDet && !tabDet.classList.contains("is-active")) tabDet.click(); else switchView("table");
+      await refreshResumoFromApi();
       applyFiltersAndRender();
       renderAppliedFilters();
     });
@@ -16354,7 +16758,6 @@ function ensureSyntheticDashboardRowsForTree(rows = [], sections = []) {
         syntheticSource: "dashboard",
         segmento: segmentoValor,
         segmentoId: segmentoValor,
-        segmentoScenario: CURRENT_SEGMENT_SCENARIO,
         diretoria: "",
         diretoriaNome: "",
         gerenciaRegional: "",
@@ -16698,7 +17101,6 @@ function renderTreeTable() {
   nodes.forEach(n=>renderNode(n,null,[]));
 }
 function applyFiltersAndRender(){
-  ensureSegmentScenarioFromFilters();
   updatePeriodLabels();
   updateDashboardCards();
   if(state.tableRendered) renderTreeTable();
@@ -16823,6 +17225,7 @@ async function refresh(){
       updatePeriodLabels();
     }
 
+    await refreshResumoFromApi();
     updateDashboardCards();
     reorderFiltersUI();
     renderAppliedFilters();
